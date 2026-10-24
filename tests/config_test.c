@@ -192,6 +192,49 @@ static void test_bad_ports(void)
     CHECK(config_parse_string(c6, err, sizeof(err)) == -1);
 }
 
+/* Acceptance: `mode = permanent` parses, and an optional `admin_sequence`
+ * configures a revoke knock. */
+static const char *permanent_cfg =
+    "[global]\ninterface = lo\n"
+    "[trigger:whitelist]\nport = 22\nprotocol = tcp\n"
+    "sequence = 7000,8000,9000\nmode = permanent\n"
+    "admin_sequence = 9000,8000,7000\n";
+
+static void test_permanent_mode(void)
+{
+    char err[256];
+    CHECK_EQ_INT(config_parse_string(permanent_cfg, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.n_triggers, 1);
+    CHECK_EQ_INT(g_cfg.triggers[0].mode, MODE_PERMANENT);
+    CHECK_EQ_INT(g_cfg.triggers[0].seq_len, 3);
+    /* admin revoke sequence */
+    CHECK_EQ_INT(g_cfg.triggers[0].admin_seq_len, 3);
+    CHECK_EQ_INT(g_cfg.triggers[0].admin_sequence[0], 9000);
+    CHECK_EQ_INT(g_cfg.triggers[0].admin_sequence[2], 7000);
+}
+
+/* Permanent mode without an admin_sequence is valid: no revoke configured. */
+static void test_permanent_no_admin(void)
+{
+    char err[256];
+    const char *c =
+        "[global]\ninterface = lo\n[trigger:t]\nport = 22\nprotocol = tcp\n"
+        "sequence = 1,2,3\nmode = permanent\n";
+    CHECK_EQ_INT(config_parse_string(c, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.triggers[0].mode, MODE_PERMANENT);
+    CHECK_EQ_INT(g_cfg.triggers[0].admin_seq_len, 0);
+}
+
+/* Invalid mode values are rejected. */
+static void test_bad_mode(void)
+{
+    char err[256];
+    const char *c =
+        "[global]\ninterface = lo\n[trigger:t]\nport = 22\nprotocol = tcp\n"
+        "sequence = 1,2\nmode = never\n";
+    CHECK(config_parse_string(c, err, sizeof(err)) == -1);
+}
+
 int main(void)
 {
     printf("== config parser tests ==\n");
@@ -206,5 +249,8 @@ int main(void)
     TEST_RUN(test_single_port);
     TEST_RUN(test_multi_port);
     TEST_RUN(test_bad_ports);
+    TEST_RUN(test_permanent_mode);
+    TEST_RUN(test_permanent_no_admin);
+    TEST_RUN(test_bad_mode);
     TEST_SUMMARY();
 }

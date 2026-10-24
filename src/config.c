@@ -126,7 +126,10 @@ static trigger_mode_t parse_mode(const char *s, char *err, size_t errlen)
 {
     if (strcmp(s, "fixed_ttl") == 0)  return MODE_FIXED_TTL;
     if (strcmp(s, "close_on_connect") == 0) return MODE_CLOSE_ON_CONNECT;
-    snprintf(err, errlen, "mode must be 'fixed_ttl' or 'close_on_connect' (got '%s')", s);
+    if (strcmp(s, "permanent") == 0) return MODE_PERMANENT;
+    snprintf(err, errlen,
+             "mode must be 'fixed_ttl', 'close_on_connect', or 'permanent' "
+             "(got '%s')", s);
     return (trigger_mode_t)-1;
 }
 
@@ -220,6 +223,14 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                                           sizeof(errmsg));
                 if (pe) { snprintf(err, errlen, "%s", pe); return -1; }
                 cur->seq_len = cnt;
+            } else if (strcmp(key, "admin_sequence") == 0) {
+                /* Optional revoke knock. Reuses the sequence parser; an empty
+                 * value leaves admin_sequence NULL (no revoke configured). */
+                size_t cnt;
+                char *ae = parse_sequence(val, &cur->admin_sequence, &cnt,
+                                          errmsg, sizeof(errmsg));
+                if (ae) { snprintf(err, errlen, "%s", ae); return -1; }
+                cur->admin_seq_len = cnt;
             } else if (strcmp(key, "window") == 0) {
                 char *e; cur->window = strtod(val, &e);
                 if (*e || cur->window <= 0) { snprintf(err, errlen, "invalid window"); return -1; }
@@ -264,6 +275,7 @@ fail:
     for (size_t i = 0; i < n; i++) {
         free(trigs[i].sequence);
         free(trigs[i].ports);
+        free(trigs[i].admin_sequence);
     }
     free(trigs);
     free(section);

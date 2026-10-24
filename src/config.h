@@ -13,7 +13,8 @@
 
 typedef enum {
     MODE_FIXED_TTL = 0,     /* keep the port open for `duration` seconds */
-    MODE_CLOSE_ON_CONNECT   /* close as soon as the client connects */
+    MODE_CLOSE_ON_CONNECT,  /* close as soon as the client connects */
+    MODE_PERMANENT          /* open with no timeout; revoke via admin_sequence */
 } trigger_mode_t;
 
 typedef struct {
@@ -23,6 +24,8 @@ typedef struct {
     proto_t     protocol;           /* PROTO_TCP / PROTO_UDP */
     uint16_t   *sequence;           /* source-port knock sequence */
     size_t      seq_len;
+    uint16_t   *admin_sequence;     /* optional: revoke knock (removes IP) */
+    size_t      admin_seq_len;
     double      window;             /* whole sequence must finish within this */
     trigger_mode_t mode;
     double      duration;           /* seconds, for MODE_FIXED_TTL */
