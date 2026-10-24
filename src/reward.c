@@ -60,7 +60,9 @@ static void fmt_timeout(char *out, size_t outlen, double secs)
 {
     long s = (long)secs;
     if (s % 60 == 0 && s >= 60)
-        snprintf(out, outlen, "%ldmin", s / 60);
+        /* nft duration units are single-letter: s/m/h/d. The word "min" is
+         * rejected by modern nft, so emit "m" for minutes. */
+        snprintf(out, outlen, "%ldm", s / 60);
     else
         snprintf(out, outlen, "%lds", s);
 }
@@ -76,7 +78,8 @@ int reward_init(reward_t *r, const char *table, uint16_t port, proto_t proto,
     memset(r, 0, sizeof(*r));
     strncpy(r->table, table, sizeof(r->table) - 1);
     strncpy(r->chain, "service", sizeof(r->chain) - 1);
-    strncpy(r->set, "allowed", sizeof(r->set) - 1);
+    strncpy(r->set_v4, "allowed_v4", sizeof(r->set_v4) - 1);
+    strncpy(r->set_v6, "allowed_v6", sizeof(r->set_v6) - 1);
     r->port = port;
     r->proto = proto;
     r->fallback_ttl = fallback_ttl > 0 ? fallback_ttl : 30.0;
@@ -87,10 +90,14 @@ int reward_init(reward_t *r, const char *table, uint16_t port, proto_t proto,
     snprintf(cmd, sizeof(cmd), "add table %s", r->table);
     run_nft_str(cmd);
 
-    /* Set (type in_addr, per-element timeout). */
+    /* Per-family allowed sets (per-element timeout). */
     snprintf(cmd, sizeof(cmd),
              "add set %s %s { type ipv4_addr; flags timeout; size 256; }",
-             r->table, r->set);
+             r->table, r->set_v4);
+    run_nft_str(cmd);
+    snprintf(cmd, sizeof(cmd),
+             "add set %s %s { type ipv6_addr; flags timeout; size 256; }",
+             r->table, r->set_v6);
     run_nft_str(cmd);
 
     /* Base chain, policy accept so other traffic is unaffected. */
@@ -103,10 +110,15 @@ int reward_init(reward_t *r, const char *table, uint16_t port, proto_t proto,
     snprintf(cmd, sizeof(cmd), "flush chain %s %s", r->table, r->chain);
     run_nft_str(cmd);
 
-    /* accept for allowed IPs, then drop the port for everyone else. */
+    /* accept for allowed clients per family, then drop the port for everyone
+     * else (the drop rule matches both families in an inet table). */
     snprintf(cmd, sizeof(cmd),
              "add rule %s %s ip saddr @%s %s dport %d accept",
-             r->table, r->chain, r->set, proto_str(proto), port);
+             r->table, r->chain, r->set_v4, proto_str(proto), port);
+    run_nft_str(cmd);
+    snprintf(cmd, sizeof(cmd),
+             "add rule %s %s ip6 saddr @%s %s dport %d accept",
+             r->table, r->chain, r->set_v6, proto_str(proto), port);
     run_nft_str(cmd);
 
     snprintf(cmd, sizeof(cmd),
@@ -120,11 +132,21 @@ int reward_init(reward_t *r, const char *table, uint16_t port, proto_t proto,
     return 0;
 }
 
-int reward_open(reward_t *r, const struct in_addr *ip, double timeout)
+/* Select the allowed set for a family. Returns NULL for an unknown family. */
+static const char *set_for_family(reward_t *r, int family)
+{
+    return family == AF_INET6 ? r->set_v6 : r->set_v4;
+}
+
+int reward_open(reward_t *r, int family, const void *ip, double timeout)
 {
     if (!r->initialized) return -1;
-    char ipstr[64];
-    inet_ntop(AF_INET, &ip->s_addr, ipstr, sizeof(ipstr));
+    const char *set = set_for_family(r, family);
+    if (!set) return -1;
+    char ipstr[48];
+    int af = family == AF_INET6 ? AF_INET6 : AF_INET;
+    if (inet_ntop(af, ip, ipstr, sizeof(ipstr)) == NULL)
+        return -1;
 
     char cmd[512];
     char to[32];
@@ -132,25 +154,29 @@ int reward_open(reward_t *r, const struct in_addr *ip, double timeout)
         fmt_timeout(to, sizeof(to), timeout);
         snprintf(cmd, sizeof(cmd),
                  "add element %s %s { %s timeout %s }",
-                 r->table, r->set, ipstr, to);
+                 r->table, set, ipstr, to);
     } else {
         snprintf(cmd, sizeof(cmd),
                  "add element %s %s { %s }",
-                 r->table, r->set, ipstr);
+                 r->table, set, ipstr);
     }
     return run_nft_str(cmd);
 }
 
-int reward_close(reward_t *r, const struct in_addr *ip)
+int reward_close(reward_t *r, int family, const void *ip)
 {
     if (!r->initialized) return -1;
-    char ipstr[64];
-    inet_ntop(AF_INET, &ip->s_addr, ipstr, sizeof(ipstr));
+    const char *set = set_for_family(r, family);
+    if (!set) return -1;
+    int af = family == AF_INET6 ? AF_INET6 : AF_INET;
+    char ipstr[48];
+    if (inet_ntop(af, ip, ipstr, sizeof(ipstr)) == NULL)
+        return -1;
 
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
              "delete element %s %s { %s }",
-             r->table, r->set, ipstr);
+             r->table, set, ipstr);
     return run_nft_str(cmd);
 }
 
@@ -158,8 +184,13 @@ int reward_flush(reward_t *r)
 {
     if (!r->initialized) return -1;
     char cmd[512];
+    /* Remove every element from both family sets. */
     snprintf(cmd, sizeof(cmd),
              "delete element %s %s { * }",
-             r->table, r->set);
+             r->table, r->set_v4);
+    run_nft_str(cmd);
+    snprintf(cmd, sizeof(cmd),
+             "delete element %s %s { * }",
+             r->table, r->set_v6);
     return run_nft_str(cmd);
 }
