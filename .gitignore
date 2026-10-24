@@ -5,6 +5,7 @@
 /state_test
 /packet_test
 /config_test
+/close_test
 /tests/*.o
 # instrumented / debug builds
 *_asan
