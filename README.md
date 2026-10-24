@@ -67,7 +67,7 @@ interface = eth0
 
 [trigger:ssh]
 service = ssh
-port = 22                 # hidden service port to open
+port = 22                 # hidden service port(s) to open
 protocol = tcp            # tcp or udp
 sequence = 7000,8000,9000 # ordered source-port knock
 window = 5                # whole sequence must complete within N seconds
@@ -80,6 +80,11 @@ fallback_ttl = 300        # safety max open time (close_on_connect)
 - `mode = close_on_connect` — close as soon as the client makes a connection
   (with `fallback_ttl` as a safety net so a client that never connects can't
   leave the port open forever).
+- `port` accepts a single port, a comma-separated list, or an inclusive range,
+  e.g. `port = 22`, `port = 80, 443`, or `port = 8000-8002`. On a successful
+  knock **all** listed ports are opened for the client (each port gets its own
+  nftables accept/drop rule, sharing one per-family "allowed" set). Ports must
+  be in 1..65535.
 
 ## Running
 

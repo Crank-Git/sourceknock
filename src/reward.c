@@ -72,15 +72,16 @@ static const char *proto_str(proto_t proto)
     return proto == PROTO_UDP ? "udp" : "tcp";
 }
 
-int reward_init(reward_t *r, const char *table, uint16_t port, proto_t proto,
-                double fallback_ttl)
+int reward_init(reward_t *r, const char *table, const uint16_t *ports,
+                size_t n_ports, proto_t proto, double fallback_ttl)
 {
     memset(r, 0, sizeof(*r));
     strncpy(r->table, table, sizeof(r->table) - 1);
     strncpy(r->chain, "service", sizeof(r->chain) - 1);
     strncpy(r->set_v4, "allowed_v4", sizeof(r->set_v4) - 1);
     strncpy(r->set_v6, "allowed_v6", sizeof(r->set_v6) - 1);
-    r->port = port;
+    r->ports = ports;
+    r->n_ports = n_ports;
     r->proto = proto;
     r->fallback_ttl = fallback_ttl > 0 ? fallback_ttl : 30.0;
 
@@ -110,25 +111,29 @@ int reward_init(reward_t *r, const char *table, uint16_t port, proto_t proto,
     snprintf(cmd, sizeof(cmd), "flush chain %s %s", r->table, r->chain);
     run_nft_str(cmd);
 
-    /* accept for allowed clients per family, then drop the port for everyone
-     * else (the drop rule matches both families in an inet table). */
-    snprintf(cmd, sizeof(cmd),
-             "add rule %s %s ip saddr @%s %s dport %d accept",
-             r->table, r->chain, r->set_v4, proto_str(proto), port);
-    run_nft_str(cmd);
-    snprintf(cmd, sizeof(cmd),
-             "add rule %s %s ip6 saddr @%s %s dport %d accept",
-             r->table, r->chain, r->set_v6, proto_str(proto), port);
-    run_nft_str(cmd);
+    /* One accept (per family) + one drop rule per service port. The drop rule
+     * matches both families in an inet table. Adding an IP to the allowed set
+     * opens every port, since each accept rule references that set. */
+    for (size_t i = 0; i < n_ports; i++) {
+        uint16_t port = ports[i];
+        snprintf(cmd, sizeof(cmd),
+                 "add rule %s %s ip saddr @%s %s dport %d accept",
+                 r->table, r->chain, r->set_v4, proto_str(proto), port);
+        run_nft_str(cmd);
+        snprintf(cmd, sizeof(cmd),
+                 "add rule %s %s ip6 saddr @%s %s dport %d accept",
+                 r->table, r->chain, r->set_v6, proto_str(proto), port);
+        run_nft_str(cmd);
 
-    snprintf(cmd, sizeof(cmd),
-             "add rule %s %s %s dport %d drop",
-             r->table, r->chain, proto_str(proto), port);
-    run_nft_str(cmd);
+        snprintf(cmd, sizeof(cmd),
+                 "add rule %s %s %s dport %d drop",
+                 r->table, r->chain, proto_str(proto), port);
+        run_nft_str(cmd);
+    }
 
     r->initialized = 1;
-    fprintf(stderr, "reward: service port %d/%s managed by table %s\n",
-            port, proto_str(proto), r->table);
+    fprintf(stderr, "reward: %zu service port(s) managed by table %s\n",
+            n_ports, r->table);
     return 0;
 }
 
