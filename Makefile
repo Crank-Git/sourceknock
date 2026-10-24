@@ -29,14 +29,14 @@ ifeq ($(OS),Darwin)
   endif
 endif
 
-SRC     := src/state.c src/packet.c src/config.c
+SRC     := src/state.c src/packet.c src/config.c src/close.c
 CORE_OBJ:= $(SRC:.c=.o)
 
 # Daemon links Linux-only capture/reward layers.
 DAEMON_SRC := src/sourceknock.c src/capture.c src/reward.c $(SRC)
 DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
-TESTS := state_test packet_test config_test
+TESTS := state_test packet_test config_test close_test
 
 .PHONY: all test daemon clean
 
@@ -58,6 +58,8 @@ state_test: tests/state_test.o src/state.o
 packet_test: tests/packet_test.o src/packet.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 config_test: tests/config_test.o src/config.o
+	$(CC) $^ -o $@ $(LDFLAGS)
+close_test: tests/close_test.o src/close.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 
 # ---- the daemon (Linux only) ----

@@ -81,6 +81,12 @@ admin_sequence = 9000,8000,7000  # optional revoke knock (permanent mode)
 - `mode = close_on_connect` — close as soon as the client makes a connection
   (with `fallback_ttl` as a safety net so a client that never connects can't
   leave the port open forever).
+  - **TCP:** the first packet to a service port (the connection's SYN) closes
+    the port.
+  - **UDP:** there is no handshake, so the first *subsequent* UDP packet to a
+    service port closes the port. The arming knock itself does **not** close
+    the port the instant it opens — only a later packet to the service port
+    does.
 - `mode = permanent` — open the port with no timeout, so access persists past
   any TTL without re-knocking. Pair with an optional `admin_sequence` to revoke:
   when that separate knock completes, the client's IP is removed from the allowed

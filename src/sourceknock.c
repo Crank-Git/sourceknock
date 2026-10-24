@@ -10,6 +10,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
 #include "state.h"
+#include "close.h"
 #include "capture.h"
 #include "reward.h"
 
@@ -134,14 +135,6 @@ static void fmt_ports(const trigger_t *tr, char *out, size_t n)
     out[off] = '\0';
 }
 
-/* Is `port` one of the trigger's service ports? */
-static int port_in_list(const trigger_t *tr, uint16_t port)
-{
-    for (size_t i = 0; i < tr->n_ports; i++)
-        if (tr->ports[i] == port) return 1;
-    return 0;
-}
-
 /* Remove armed entries whose deadline has passed (safety net). */
 static void cleanup_armed(trigger_state_t *ts, double now)
 {
@@ -233,18 +226,18 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
             kn_feed(t->admin_ctx, pkt->family, &pkt->addr, pkt->sport, ts);
 
         /* close_on_connect: a packet to the service dest port after arming
-         * is the actual connection -> close the port. */
-        if (t->tr->mode == MODE_CLOSE_ON_CONNECT &&
-            port_in_list(t->tr, pkt->dport)) {
-            int idx = find_armed(t, pkt->family, &pkt->addr);
-            if (idx >= 0) {
-                reward_close(&t->reward, pkt->family, &pkt->addr);
-                drop_armed(t, idx);
-                char ports[128];
-                fmt_ports(t->tr, ports, sizeof(ports));
-                sk_log("[%s] connect from %s to %d: closing %s",
-                       t->tr->service, s, pkt->dport, ports);
-            }
+         * is the actual connection -> close the port. The arming knock
+         * itself (KNOCK_TRIGGER) must NOT close the port the instant it
+         * opens — for UDP there is no handshake, so only a subsequent
+         * packet to the service port ends access. */
+        int idx = find_armed(t, pkt->family, &pkt->addr);
+        if (should_close(t->tr, idx >= 0, pkt->dport, r)) {
+            reward_close(&t->reward, pkt->family, &pkt->addr);
+            drop_armed(t, idx);
+            char ports[128];
+            fmt_ports(t->tr, ports, sizeof(ports));
+            sk_log("[%s] connect from %s to %d: closing %s",
+                   t->tr->service, s, pkt->dport, ports);
         }
         cleanup_armed(t, ts);
     }
