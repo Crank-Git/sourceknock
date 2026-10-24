@@ -60,7 +60,9 @@ static void fmt_timeout(char *out, size_t outlen, double secs)
 {
     long s = (long)secs;
     if (s % 60 == 0 && s >= 60)
-        snprintf(out, outlen, "%ldmin", s / 60);
+        /* nft duration units are single-letter: s/m/h/d. The word "min" is
+         * rejected by modern nft, so emit "m" for minutes. */
+        snprintf(out, outlen, "%ldm", s / 60);
     else
         snprintf(out, outlen, "%lds", s);
 }
