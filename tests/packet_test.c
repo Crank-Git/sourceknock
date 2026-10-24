@@ -1,5 +1,7 @@
 /* packet_test.c - unit tests for byte-frame parsing. */
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include "test.h"
 #include "packet.h"
@@ -16,8 +18,8 @@ static void build_frame(unsigned char *buf, unsigned proto_byte,
     buf[14] = 0x45;                    /* version 4, IHL 5 */
     buf[14 + 8] = 20;                  /* total length (lo) */
     buf[14 + 9] = proto_byte;          /* L4 protocol */
-    buf[14 + 4] = sip0; buf[14 + 5] = sip1;
-    buf[14 + 6] = sip2; buf[14 + 7] = sip3;
+    buf[14 + 12] = sip0; buf[14 + 13] = sip1;
+    buf[14 + 14] = sip2; buf[14 + 15] = sip3;
     /* L4 source port (BE) */
     unsigned off = 14 + 20;
     buf[off]     = (sport >> 8) & 0xff;
@@ -33,7 +35,9 @@ static void test_tcp(void)
     CHECK(rc == 1);
     CHECK_EQ_INT(info.proto, PROTO_TCP);
     CHECK_EQ_INT(info.sport, 0x1234);
-    CHECK_EQ_INT(info.ip.s_addr, (10 << 24) | (0 << 16) | (0 << 8) | 99);
+    char s[32];
+    inet_ntop(AF_INET, &info.ip, s, sizeof(s));
+    CHECK_EQ_STR(s, "10.0.0.99");
 }
 
 static void test_udp(void)
@@ -55,15 +59,16 @@ static void test_loopback(void)
     /* IP starts at offset 2 */
     buf[2] = 0x45;
     buf[2 + 9] = IPPROTO_TCP;
-    buf[2 + 4] = 172; buf[2 + 5] = 16; buf[2 + 6] = 0; buf[2 + 7] = 5;
+    buf[2 + 12] = 172; buf[2 + 13] = 16; buf[2 + 14] = 0; buf[2 + 15] = 5;
     buf[2 + 20] = 0xab; buf[2 + 21] = 0xcd;   /* sport */
     pkt_info_t info;
     int rc = pkt_parse(buf, sizeof(buf), ARPHRD_LOOPBACK, &info);
     CHECK(rc == 1);
     CHECK_EQ_INT(info.proto, PROTO_TCP);
     CHECK_EQ_INT(info.sport, 0xabcd);
-    unsigned exp = (172u << 24) | (16u << 16) | (0u << 8) | 5u; /* 172.16.0.5 */
-    CHECK_EQ_INT(info.ip.s_addr, exp);
+    char s[32];
+    inet_ntop(AF_INET, &info.ip, s, sizeof(s));
+    CHECK_EQ_STR(s, "172.16.0.5");
 }
 
 static void test_non_ipv4_ignored(void)

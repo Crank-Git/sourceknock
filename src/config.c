@@ -91,6 +91,7 @@ int config_parse_string(const char *text, char *err, size_t errlen)
     g_cfg.trigger.mode = MODE_FIXED_TTL;
     g_cfg.trigger.window = 5.0;
     g_cfg.trigger.duration = 30.0;
+    g_cfg.trigger.fallback_ttl = 300.0;  /* safety max open time */
 
     char line[1024];
     char *section = NULL;   /* "global" or "trigger:NAME" */
@@ -156,6 +157,9 @@ int config_parse_string(const char *text, char *err, size_t errlen)
             } else if (strcmp(key, "duration") == 0) {
                 char *e; tr->duration = strtod(val, &e);
                 if (*e || tr->duration <= 0) { snprintf(err, errlen, "invalid duration"); return -1; }
+            } else if (strcmp(key, "fallback_ttl") == 0) {
+                char *e; tr->fallback_ttl = strtod(val, &e);
+                if (*e || tr->fallback_ttl <= 0) { snprintf(err, errlen, "invalid fallback_ttl"); return -1; }
             } else {
                 snprintf(err, errlen, "unknown [trigger] key '%s'", key);
                 return -1;

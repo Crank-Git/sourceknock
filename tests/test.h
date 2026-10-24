@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int t_pass = 0;
 static int t_fail = 0;
@@ -19,6 +20,14 @@ static int t_fail = 0;
     if (_a == _b) { t_pass++; } \
     else { t_fail++; \
         fprintf(stderr, "  FAIL %s:%d: %s (%ld) == %s (%ld)\n", \
+                __FILE__, __LINE__, #a, _a, #b, _b); } \
+} while (0)
+
+#define CHECK_EQ_STR(a, b) do { \
+    const char *_a = (a), *_b = (b); \
+    if (_a && _b && strcmp(_a, _b) == 0) { t_pass++; } \
+    else { t_fail++; \
+        fprintf(stderr, "  FAIL %s:%d: %s (\"%s\") == %s (\"%s\")\n", \
                 __FILE__, __LINE__, #a, _a, #b, _b); } \
 } while (0)
 

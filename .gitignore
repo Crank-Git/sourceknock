@@ -1,0 +1,8 @@
+# build artifacts
+*.o
+*.so
+/sourceknock
+/state_test
+/packet_test
+/config_test
+/tests/*.o

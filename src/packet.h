@@ -35,6 +35,7 @@ typedef enum {
 typedef struct {
     struct in_addr ip;
     uint16_t       sport;   /* host-byte-order source port */
+    uint16_t       dport;   /* host-byte-order destination port (0 if n/a) */
     proto_t        proto;
 } pkt_info_t;
 

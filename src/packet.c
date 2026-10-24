@@ -15,14 +15,14 @@ static uint16_t be16(const unsigned char *p, size_t len, size_t off)
     return (uint16_t)((p[off] << 8) | p[off + 1]);
 }
 
-/* Read a big-endian 32-bit field into an in_addr. */
+/* Copy the 4-byte network-order source address into an in_addr. Storing the
+ * raw wire bytes (not a host-order integer) is what inet_ntop/inet_pton expect. */
 static int be32_ip(const unsigned char *p, size_t len, size_t off,
                    struct in_addr *out)
 {
     if (off + 4 > len)
         return 0;
-    out->s_addr = (p[off] << 24) | (p[off + 1] << 16) |
-                  (p[off + 2] << 8)  | p[off + 3];
+    memcpy(out, &p[off], 4);
     return 1;
 }
 
@@ -67,19 +67,22 @@ int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
     size_t l4len = len - (ip_off + ihl);
 
     struct in_addr src;
-    if (!be32_ip(buf, len, ip_off + 4, &src))
+    /* IPv4 source address is at offset 12 within the IP header. */
+    if (!be32_ip(buf, len, ip_off + 12, &src))
         return 0;
 
-    /* --- L4: TCP / UDP source port --- */
-    if (l4proto == IPPROTO_TCP && l4len >= 4) {
+    /* --- L4: source port (offset 0), dest port (offset 4) --- */
+    if (l4proto == IPPROTO_TCP && l4len >= 8) {
         out->proto = PROTO_TCP;
         out->sport = be16(iph, l4len, 0);
+        out->dport = be16(iph, l4len, 4);
         out->ip = src;
         return 1;
     }
-    if (l4proto == IPPROTO_UDP && l4len >= 6) {
+    if (l4proto == IPPROTO_UDP && l4len >= 8) {
         out->proto = PROTO_UDP;
         out->sport = be16(iph, l4len, 0);
+        out->dport = be16(iph, l4len, 4);
         out->ip = src;
         return 1;
     }

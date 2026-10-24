@@ -25,6 +25,7 @@ typedef struct {
     double      window;             /* whole sequence must finish within this */
     trigger_mode_t mode;
     double      duration;           /* seconds, for MODE_FIXED_TTL */
+    double      fallback_ttl;       /* safety max open time (close_on_connect) */
 } trigger_t;
 
 typedef struct {

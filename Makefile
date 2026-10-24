@@ -33,7 +33,7 @@ SRC     := src/state.c src/packet.c src/config.c
 CORE_OBJ:= $(SRC:.c=.o)
 
 # Daemon links Linux-only capture/reward layers.
-DAEMON_SRC := src/sourceknock.c $(SRC)
+DAEMON_SRC := src/sourceknock.c src/capture.c src/reward.c $(SRC)
 DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
 TESTS := state_test packet_test config_test
