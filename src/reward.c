@@ -70,10 +70,11 @@ static const char *proto_str(proto_t proto)
     return proto == PROTO_UDP ? "udp" : "tcp";
 }
 
-int reward_init(reward_t *r, uint16_t port, proto_t proto, double fallback_ttl)
+int reward_init(reward_t *r, const char *table, uint16_t port, proto_t proto,
+                double fallback_ttl)
 {
     memset(r, 0, sizeof(*r));
-    strncpy(r->table, "inet sourceknock", sizeof(r->table) - 1);
+    strncpy(r->table, table, sizeof(r->table) - 1);
     strncpy(r->chain, "service", sizeof(r->chain) - 1);
     strncpy(r->set, "allowed", sizeof(r->set) - 1);
     r->port = port;

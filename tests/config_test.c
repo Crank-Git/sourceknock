@@ -23,15 +23,16 @@ static void test_good(void)
     char err[256];
     CHECK_EQ_INT(config_parse_string(good_cfg, err, sizeof(err)), 0);
     CHECK_EQ_INT(strcmp(g_cfg.interface, "eth0"), 0);
-    CHECK_EQ_INT(strcmp(g_cfg.trigger.service, "ssh"), 0);
-    CHECK_EQ_INT(g_cfg.trigger.port, 22);
-    CHECK_EQ_INT(g_cfg.trigger.protocol, PROTO_TCP);
-    CHECK_EQ_INT(g_cfg.trigger.seq_len, 3);
-    CHECK_EQ_INT(g_cfg.trigger.sequence[0], 7000);
-    CHECK_EQ_INT(g_cfg.trigger.sequence[2], 9000);
-    CHECK_EQ_INT(g_cfg.trigger.window, 5);
-    CHECK_EQ_INT(g_cfg.trigger.mode, MODE_FIXED_TTL);
-    CHECK_EQ_INT(g_cfg.trigger.duration, 30);
+    CHECK_EQ_INT(g_cfg.n_triggers, 1);
+    CHECK_EQ_INT(strcmp(g_cfg.triggers[0].service, "ssh"), 0);
+    CHECK_EQ_INT(g_cfg.triggers[0].port, 22);
+    CHECK_EQ_INT(g_cfg.triggers[0].protocol, PROTO_TCP);
+    CHECK_EQ_INT(g_cfg.triggers[0].seq_len, 3);
+    CHECK_EQ_INT(g_cfg.triggers[0].sequence[0], 7000);
+    CHECK_EQ_INT(g_cfg.triggers[0].sequence[2], 9000);
+    CHECK_EQ_INT(g_cfg.triggers[0].window, 5);
+    CHECK_EQ_INT(g_cfg.triggers[0].mode, MODE_FIXED_TTL);
+    CHECK_EQ_INT(g_cfg.triggers[0].duration, 30);
 }
 
 static const char *udp_cfg =
@@ -43,9 +44,9 @@ static void test_udp_close(void)
 {
     char err[256];
     CHECK_EQ_INT(config_parse_string(udp_cfg, err, sizeof(err)), 0);
-    CHECK_EQ_INT(g_cfg.trigger.protocol, PROTO_UDP);
-    CHECK_EQ_INT(g_cfg.trigger.seq_len, 5);
-    CHECK_EQ_INT(g_cfg.trigger.mode, MODE_CLOSE_ON_CONNECT);
+    CHECK_EQ_INT(g_cfg.triggers[0].protocol, PROTO_UDP);
+    CHECK_EQ_INT(g_cfg.triggers[0].seq_len, 5);
+    CHECK_EQ_INT(g_cfg.triggers[0].mode, MODE_CLOSE_ON_CONNECT);
 }
 
 static const char *bad_seq =
@@ -89,6 +90,45 @@ static void test_bad_port(void)
     CHECK(config_parse_string(c2, err, sizeof(err)) == -1);
 }
 
+/* Acceptance: two [trigger:] sections parse into two distinct triggers. */
+static const char *multi_cfg =
+    "[global]\ninterface = eth0\n"
+    "[trigger:ssh]\nport = 22\nprotocol = tcp\n"
+    "  sequence = 7000,8000\nmode = fixed_ttl\nduration = 30\n"
+    "[trigger:web]\nport = 8080\nprotocol = udp\n"
+    "  sequence = 1,2,3\nmode = close_on_connect\nwindow = 10\n";
+
+static void test_multi_trigger(void)
+{
+    char err[256];
+    CHECK_EQ_INT(config_parse_string(multi_cfg, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.n_triggers, 2);
+    /* trigger 0: ssh / tcp / 22 / 2 ports */
+    CHECK_EQ_INT(strcmp(g_cfg.triggers[0].service, "ssh"), 0);
+    CHECK_EQ_INT(g_cfg.triggers[0].port, 22);
+    CHECK_EQ_INT(g_cfg.triggers[0].protocol, PROTO_TCP);
+    CHECK_EQ_INT(g_cfg.triggers[0].seq_len, 2);
+    CHECK_EQ_INT(g_cfg.triggers[0].mode, MODE_FIXED_TTL);
+    /* trigger 1: web / udp / 8080 / 3 ports */
+    CHECK_EQ_INT(strcmp(g_cfg.triggers[1].service, "web"), 0);
+    CHECK_EQ_INT(g_cfg.triggers[1].port, 8080);
+    CHECK_EQ_INT(g_cfg.triggers[1].protocol, PROTO_UDP);
+    CHECK_EQ_INT(g_cfg.triggers[1].seq_len, 3);
+    CHECK_EQ_INT(g_cfg.triggers[1].mode, MODE_CLOSE_ON_CONNECT);
+}
+
+/* Acceptance: a trigger without a sequence is a config error. */
+static void test_multi_trigger_missing_seq(void)
+{
+    char err[256];
+    const char *c =
+        "[global]\ninterface = lo\n"
+        "[trigger:a]\nport = 22\nprotocol = tcp\nsequence = 1,2\n"
+        "[trigger:b]\nport = 80\nprotocol = tcp\n";  /* no sequence */
+    CHECK(config_parse_string(c, err, sizeof(err)) == -1);
+    CHECK_EQ_INT(g_cfg.n_triggers, 0);  /* nothing left valid on error */
+}
+
 int main(void)
 {
     printf("== config parser tests ==\n");
@@ -98,5 +138,7 @@ int main(void)
     TEST_RUN(test_missing_sequence);
     TEST_RUN(test_bad_protocol);
     TEST_RUN(test_bad_port);
+    TEST_RUN(test_multi_trigger);
+    TEST_RUN(test_multi_trigger_missing_seq);
     TEST_SUMMARY();
 }
