@@ -6,3 +6,14 @@
 /packet_test
 /config_test
 /tests/*.o
+# instrumented / debug builds
+*_asan
+*_dbg
+# macOS debug-symbol bundles
+*.dSYM/
+# logs
+*.log
+# test-generated config dirs and temp output (keep examples/*.conf tracked)
+tests/**/conf.d/
+tests/**/tmp/
+tests/**/fixtures/
