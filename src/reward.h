@@ -31,8 +31,11 @@ typedef struct {
     int         initialized;
 } reward_t;
 
-/* Create table/set/chain if missing. Idempotent. Returns 0 on success. */
-int reward_init(reward_t *r, uint16_t port, proto_t proto,
+/* Create table/set/chain if missing. Idempotent. Returns 0 on success.
+ * `table` is the full nft table name (e.g. "inet sourceknock_ssh"); callers
+ * must give each trigger a distinct name so multiple triggers don't clobber
+ * each other's rules. */
+int reward_init(reward_t *r, const char *table, uint16_t port, proto_t proto,
                 double fallback_ttl);
 
 /* Open the port for `ip`. For fixed_ttl modes the caller passes a timeout;

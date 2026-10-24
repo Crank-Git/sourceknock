@@ -30,8 +30,8 @@ typedef struct {
 
 typedef struct {
     char        interface[64];
-    trigger_t   trigger;
-    int         has_trigger;
+    trigger_t  *triggers;   /* n_triggers entries; each owns `sequence` */
+    size_t      n_triggers;
 } config_t;
 
 /* Populate *cfg from a NUL-terminated config string. Returns 0 on success,

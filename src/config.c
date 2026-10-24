@@ -85,15 +85,12 @@ int config_parse_string(const char *text, char *err, size_t errlen)
     memset(&g_cfg, 0, sizeof(g_cfg));
     strncpy(g_cfg.interface, "lo", sizeof(g_cfg.interface) - 1);
 
-    strncpy(g_cfg.trigger.service, "service", sizeof(g_cfg.trigger.service) - 1);
-    g_cfg.trigger.protocol = PROTO_TCP;
-    g_cfg.trigger.mode = MODE_FIXED_TTL;
-    g_cfg.trigger.window = 5.0;
-    g_cfg.trigger.duration = 30.0;
-    g_cfg.trigger.fallback_ttl = 300.0;  /* safety max open time */
-
+    /* Growable list of triggers, one per [trigger:NAME] section. */
+    trigger_t *trigs = NULL;
+    size_t n = 0, cap = 0;
+    trigger_t *cur = NULL;   /* the trigger currently being populated */
     char line[1024];
-    char *section = NULL;   /* "global" or "trigger:NAME" */
+    char *section = NULL;    /* "global" or "trigger:NAME" */
     const char *p = text;
     char errmsg[256];
 
@@ -110,10 +107,35 @@ int config_parse_string(const char *text, char *err, size_t errlen)
 
         if (*s == '[') {
             char *end = strchr(s, ']');
-            if (!end) { snprintf(err, errlen, "malformed section header"); return -1; }
+            if (!end) { snprintf(err, errlen, "malformed section header"); goto fail; }
             *end = '\0';
             free(section);
             section = strdup(trim(s + 1));
+
+            if (strcmp(section, "global") == 0) {
+                cur = NULL;
+            } else if (strncmp(section, "trigger:", 8) == 0) {
+                if (n == cap) {
+                    size_t ncap = cap ? cap * 2 : 4;
+                    trigger_t *nt = realloc(trigs, ncap * sizeof(*trigs));
+                    if (!nt) { snprintf(err, errlen, "out of memory"); goto fail; }
+                    trigs = nt;
+                    cap = ncap;
+                }
+                memset(&trigs[n], 0, sizeof(*trigs));
+                strncpy(trigs[n].service, section + 8,
+                        sizeof(trigs[n].service) - 1);
+                trigs[n].protocol = PROTO_TCP;
+                trigs[n].mode = MODE_FIXED_TTL;
+                trigs[n].window = 5.0;
+                trigs[n].duration = 30.0;
+                trigs[n].fallback_ttl = 300.0;  /* safety max open time */
+                n++;
+                cur = &trigs[n - 1];
+            } else {
+                snprintf(err, errlen, "unknown section '%s'", trim(s + 1));
+                goto fail;
+            }
             continue;
         }
 
@@ -131,36 +153,37 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                 snprintf(err, errlen, "%s", errmsg);
                 return -1;
             }
-        } else if (strncmp(section, "trigger:", 8) == 0) {
-            trigger_t *tr = &g_cfg.trigger;
+        } else if (cur) {
             if (strcmp(key, "service") == 0) {
-                strncpy(tr->service, val, sizeof(tr->service) - 1);
+                strncpy(cur->service, val, sizeof(cur->service) - 1);
             } else if (strcmp(key, "port") == 0) {
                 char *e; long v = strtol(val, &e, 10);
                 if (*e || v < 1 || v > 65535) { snprintf(err, errlen, "invalid port"); return -1; }
-                tr->port = (uint16_t)v;
+                cur->port = (uint16_t)v;
             } else if (strcmp(key, "protocol") == 0) {
-                tr->protocol = parse_proto(val, err, errlen);
-                if (tr->protocol == PROTO_NONE) return -1;
+                cur->protocol = parse_proto(val, err, errlen);
+                if (cur->protocol == PROTO_NONE) return -1;
             } else if (strcmp(key, "sequence") == 0) {
-                size_t n;
-                char *pe = parse_sequence(val, &tr->sequence, &n, errmsg, sizeof(errmsg));
+                size_t cnt;
+                char *pe = parse_sequence(val, &cur->sequence, &cnt, errmsg,
+                                          sizeof(errmsg));
                 if (pe) { snprintf(err, errlen, "%s", pe); return -1; }
-                tr->seq_len = n;
+                cur->seq_len = cnt;
             } else if (strcmp(key, "window") == 0) {
-                char *e; tr->window = strtod(val, &e);
-                if (*e || tr->window <= 0) { snprintf(err, errlen, "invalid window"); return -1; }
+                char *e; cur->window = strtod(val, &e);
+                if (*e || cur->window <= 0) { snprintf(err, errlen, "invalid window"); return -1; }
             } else if (strcmp(key, "mode") == 0) {
-                tr->mode = parse_mode(val, err, errlen);
-                if (tr->mode == (trigger_mode_t)-1) return -1;
+                cur->mode = parse_mode(val, err, errlen);
+                if (cur->mode == (trigger_mode_t)-1) return -1;
             } else if (strcmp(key, "duration") == 0) {
-                char *e; tr->duration = strtod(val, &e);
-                if (*e || tr->duration <= 0) { snprintf(err, errlen, "invalid duration"); return -1; }
+                char *e; cur->duration = strtod(val, &e);
+                if (*e || cur->duration <= 0) { snprintf(err, errlen, "invalid duration"); return -1; }
             } else if (strcmp(key, "fallback_ttl") == 0) {
-                char *e; tr->fallback_ttl = strtod(val, &e);
-                if (*e || tr->fallback_ttl <= 0) { snprintf(err, errlen, "invalid fallback_ttl"); return -1; }
+                char *e; cur->fallback_ttl = strtod(val, &e);
+                if (*e || cur->fallback_ttl <= 0) { snprintf(err, errlen, "invalid fallback_ttl"); return -1; }
             } else {
-                snprintf(err, errlen, "unknown [trigger] key '%s'", key);
+                snprintf(err, errlen, "unknown [trigger:%s] key '%s'",
+                         cur->service, key);
                 return -1;
             }
         } else {
@@ -169,16 +192,30 @@ int config_parse_string(const char *text, char *err, size_t errlen)
         }
     }
 
-    free(section);
-
-    /* validation */
-    if (!g_cfg.trigger.sequence || g_cfg.trigger.seq_len == 0) {
-        snprintf(err, errlen, "trigger.sequence is required");
-        return -1;
+    /* validation: every trigger needs a non-empty sequence. */
+    int ok = 1;
+    for (size_t i = 0; i < n; i++) {
+        if (!trigs[i].sequence || trigs[i].seq_len == 0) {
+            snprintf(err, errlen, "trigger '%s': sequence is required",
+                     trigs[i].service);
+            ok = 0;
+            break;
+        }
     }
-    if (!g_cfg.has_trigger) { /* nothing enforced yet; accept */ }
-    g_cfg.has_trigger = 1;
+    if (!ok) goto fail;
+
+    g_cfg.triggers = trigs;
+    g_cfg.n_triggers = n;
+    free(section);
     return 0;
+
+fail:
+    for (size_t i = 0; i < n; i++) free(trigs[i].sequence);
+    free(trigs);
+    free(section);
+    g_cfg.triggers = NULL;
+    g_cfg.n_triggers = 0;
+    return -1;
 }
 
 int config_parse_file(const char *path, char *err, size_t errlen)
