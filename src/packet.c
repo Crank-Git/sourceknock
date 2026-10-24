@@ -93,13 +93,13 @@ static int parse_ipv4(const unsigned char *buf, size_t len, size_t ip_off,
     if (!be32_ip(buf, len, ip_off + 12, &src))
         return 0;
 
-    /* --- L4: source port (offset 0), dest port (offset 4) --- */
+    /* --- L4: source port (offset 0), dest port (offset 2) --- */
     if (l4proto == IPPROTO_TCP && l4len >= 8) {
         out->family = AF_INET;
         out->addr.v4 = src;
         out->proto = PROTO_TCP;
         out->sport = be16(iph, l4len, 0);
-        out->dport = be16(iph, l4len, 4);
+        out->dport = be16(iph, l4len, 2);
         return 1;
     }
     if (l4proto == IPPROTO_UDP && l4len >= 8) {
@@ -107,7 +107,7 @@ static int parse_ipv4(const unsigned char *buf, size_t len, size_t ip_off,
         out->addr.v4 = src;
         out->proto = PROTO_UDP;
         out->sport = be16(iph, l4len, 0);
-        out->dport = be16(iph, l4len, 4);
+        out->dport = be16(iph, l4len, 2);
         return 1;
     }
     return 0;
@@ -138,14 +138,14 @@ static int parse_ipv6(const unsigned char *buf, size_t len, size_t ip_off,
         out->addr.v6 = src;
         out->proto = PROTO_TCP;
         out->sport = be16(l4, l4len, 0);
-        out->dport = be16(l4, l4len, 4);
+        out->dport = be16(l4, l4len, 2);
         return 1;
     }
     out->family = AF_INET6;
     out->addr.v6 = src;
     out->proto = PROTO_UDP;
     out->sport = be16(l4, l4len, 0);
-    out->dport = be16(l4, l4len, 4);
+    out->dport = be16(l4, l4len, 2);
     return 1;
 }
 
