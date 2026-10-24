@@ -1,25 +1,33 @@
 /* state.c - knock-sequence state machine implementation. */
 #include "state.h"
+#include "packet.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-static kn_client_t *find_client(kn_ctx_t *ctx, const struct in_addr *ip)
+/* Compare two addresses of the same family. Returns 0 if equal. */
+static int addr_eq(int family, const void *a, const void *b)
+{
+    return memcmp(a, b, pkt_addr_len(family)) == 0;
+}
+
+static kn_client_t *find_client(kn_ctx_t *ctx, int family, const void *ip)
 {
     for (size_t i = 0; i < ctx->n_clients; i++) {
-        if (memcmp(&ctx->clients[i].ip, ip, sizeof(struct in_addr)) == 0)
+        if (ctx->clients[i].family == family && addr_eq(family,
+                &ctx->clients[i].addr, ip))
             return &ctx->clients[i];
     }
     return NULL;
 }
 
 /* Grow the client table if needed. Returns 0 on success. */
-static int ensure_client(kn_ctx_t *ctx, const struct in_addr *ip,
+static int ensure_client(kn_ctx_t *ctx, int family, const void *ip,
                          kn_client_t **out)
 {
     /* Reuse existing? */
-    kn_client_t *c = find_client(ctx, ip);
+    kn_client_t *c = find_client(ctx, family, ip);
     if (c) {
         *out = c;
         return 0;
@@ -35,7 +43,8 @@ static int ensure_client(kn_ctx_t *ctx, const struct in_addr *ip,
     }
     c = &ctx->clients[ctx->n_clients++];
     memset(c, 0, sizeof(*c));
-    c->ip = *ip;
+    c->family = family;
+    memcpy(&c->addr, ip, pkt_addr_len(family));
     c->state = KNOCK_IDLE;
     *out = c;
     return 0;
@@ -78,9 +87,9 @@ void kn_set_complete(kn_ctx_t *ctx, kn_complete_fn fn, void *arg)
     ctx->complete_arg = arg;
 }
 
-kn_client_t *kn_find(kn_ctx_t *ctx, const struct in_addr *ip)
+kn_client_t *kn_find(kn_ctx_t *ctx, int family, const void *ip)
 {
-    kn_client_t *c = find_client(ctx, ip);
+    kn_client_t *c = find_client(ctx, family, ip);
     if (c && c->state != KNOCK_IDLE)
         return c;
     return NULL;
@@ -94,11 +103,11 @@ static void client_reset(kn_client_t *c)
     c->start_time = 0.0;
 }
 
-kn_result_t kn_feed(kn_ctx_t *ctx, const struct in_addr *ip,
+kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip,
                     uint16_t sport, double now)
 {
     kn_client_t *c;
-    if (ensure_client(ctx, ip, &c) != 0)
+    if (ensure_client(ctx, family, ip, &c) != 0)
         return -1;
 
     /* Timed out? If progress started but the window elapsed, wipe it. */
@@ -127,7 +136,7 @@ kn_result_t kn_feed(kn_ctx_t *ctx, const struct in_addr *ip,
     if (c->index >= ctx->seq.len) {
         c->state = KNOCK_COMPLETE;
         if (ctx->on_complete)
-            ctx->on_complete(ctx, ip, ctx->complete_arg);
+            ctx->on_complete(ctx, family, ip, ctx->complete_arg);
         /* Reset so the next knock starts fresh. */
         client_reset(c);
         return KNOCK_TRIGGER;

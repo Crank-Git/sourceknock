@@ -46,17 +46,24 @@ static void sk_log(const char *fmt, ...)
     fprintf(stderr, "\n");
 }
 
-static void ipstr(const struct in_addr *ip, char *out, size_t n)
+static void ipstr(int family, const void *ip, char *out, size_t n)
 {
-    inet_ntop(AF_INET, &ip->s_addr, out, n);
+    int af = family == AF_INET6 ? AF_INET6 : AF_INET;
+    inet_ntop(af, ip, out, n);
 }
 
 /* ---- per-trigger state ---- */
 typedef struct {
+    int family;
+    union { struct in_addr v4; struct in6_addr v6; } addr;
+    double deadline;
+} armed_entry_t;
+
+typedef struct {
     const trigger_t *tr;          /* back-reference to config */
     reward_t   reward;
     kn_ctx_t  *ctx;
-    struct { struct in_addr ip; double deadline; } armed[64];
+    armed_entry_t armed[64];
     int         n_armed;
 } trigger_state_t;
 
@@ -86,18 +93,21 @@ static void build_table_name(char *out, size_t outlen, const char *service)
     out[i] = '\0';
 }
 
-static int find_armed(trigger_state_t *ts, const struct in_addr *ip)
+static int find_armed(trigger_state_t *ts, int family, const void *ip)
 {
     for (int i = 0; i < ts->n_armed; i++)
-        if (memcmp(&ts->armed[i].ip, ip, sizeof(*ip)) == 0)
+        if (ts->armed[i].family == family &&
+            memcmp(&ts->armed[i].addr, ip, pkt_addr_len(family)) == 0)
             return i;
     return -1;
 }
 
-static void arm_ip(trigger_state_t *ts, const struct in_addr *ip, double deadline)
+static void arm_ip(trigger_state_t *ts, int family, const void *ip,
+                   double deadline)
 {
     if (ts->n_armed >= 64) return;
-    ts->armed[ts->n_armed].ip = *ip;
+    ts->armed[ts->n_armed].family = family;
+    memcpy(&ts->armed[ts->n_armed].addr, ip, pkt_addr_len(family));
     ts->armed[ts->n_armed].deadline = deadline;
     ts->n_armed++;
 }
@@ -116,9 +126,9 @@ static void cleanup_armed(trigger_state_t *ts, double now)
     while (i < ts->n_armed) {
         if (ts->armed[i].deadline <= now) {
             char s[48];
-            ipstr(&ts->armed[i].ip, s, sizeof(s));
+            ipstr(ts->armed[i].family, &ts->armed[i].addr, s, sizeof(s));
             sk_log("fallback_ttl reached: closing port for %s (no connect)", s);
-            reward_close(&ts->reward, &ts->armed[i].ip);
+            reward_close(&ts->reward, ts->armed[i].family, &ts->armed[i].addr);
             drop_armed(ts, i);
         } else {
             i++;
@@ -127,18 +137,18 @@ static void cleanup_armed(trigger_state_t *ts, double now)
 }
 
 /* Called by the state machine when a sequence completes. */
-static void on_complete(kn_ctx_t *ctx, const struct in_addr *ip, void *arg)
+static void on_complete(kn_ctx_t *ctx, int family, const void *ip, void *arg)
 {
     (void)ctx;
     trigger_state_t *ts = arg;
     const trigger_t *tr = ts->tr;
     char s[48];
-    ipstr(ip, s, sizeof(s));
+    ipstr(family, ip, s, sizeof(s));
 
     double timeout = (tr->mode == MODE_FIXED_TTL) ? tr->duration : 0.0;
     const char *proto = (tr->protocol == PROTO_UDP) ? "udp" : "tcp";
 
-    if (reward_open(&ts->reward, ip, timeout) == 0) {
+    if (reward_open(&ts->reward, family, ip, timeout) == 0) {
         if (tr->mode == MODE_FIXED_TTL)
             sk_log("[%s] knock OK from %s: opened %d/%s for %.0fs",
                    tr->service, s, tr->port, proto, tr->duration);
@@ -147,7 +157,7 @@ static void on_complete(kn_ctx_t *ctx, const struct in_addr *ip, void *arg)
                    "%.0fs max)", tr->service, s, tr->port, proto,
                    tr->fallback_ttl);
         if (tr->mode == MODE_CLOSE_ON_CONNECT)
-            arm_ip(ts, ip, mono() + tr->fallback_ttl);
+            arm_ip(ts, family, ip, mono() + tr->fallback_ttl);
     } else {
         sk_log("[%s] knock OK from %s but reward_open FAILED", tr->service, s);
     }
@@ -158,11 +168,12 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
 {
     daemon_t *d = arg;
     char s[48];
-    ipstr(&pkt->ip, s, sizeof(s));
+    ipstr(pkt->family, &pkt->addr, s, sizeof(s));
 
     for (size_t i = 0; i < d->n_triggers; i++) {
         trigger_state_t *t = &d->ts[i];
-        kn_result_t r = kn_feed(t->ctx, &pkt->ip, pkt->sport, ts);
+        kn_result_t r = kn_feed(t->ctx, pkt->family, &pkt->addr,
+                                pkt->sport, ts);
         if (r == KNOCK_RESET)
             sk_log("[%s] incomplete/wrong knock from %s: progress reset",
                    t->tr->service, s);
@@ -171,9 +182,9 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
          * is the actual connection -> close the port. */
         if (t->tr->mode == MODE_CLOSE_ON_CONNECT &&
             pkt->dport == t->tr->port) {
-            int idx = find_armed(t, &pkt->ip);
+            int idx = find_armed(t, pkt->family, &pkt->addr);
             if (idx >= 0) {
-                reward_close(&t->reward, &pkt->ip);
+                reward_close(&t->reward, pkt->family, &pkt->addr);
                 drop_armed(t, idx);
                 sk_log("[%s] connect from %s to %d: closing port",
                        t->tr->service, s, t->tr->port);

@@ -16,7 +16,9 @@ scan.
 ## How it works
 
 1. The daemon captures packets on an interface (`AF_PACKET`, root).
-2. For each packet it extracts the **source port** (and source IP).
+2. For each packet it extracts the **source port** (and source IP). Both IPv4
+   and IPv6 frames are captured and decoded (IPv6 extension headers are walked,
+   bounded).
 3. A small state machine watches each client's stream of source ports. When it
    sees the configured ordered sequence within the timing window, it "triggers".
 4. On trigger the daemon programs **nftables** to temporarily allow that client's
@@ -37,7 +39,7 @@ TCP sport=<ephemeral> -> dst=X:22  ->   port 22 now reachable for this IP
 | File | Purpose |
 |------|---------|
 | `src/state.c`   | Pure knock-sequence state machine (no OS deps) |
-| `src/packet.c`  | Parse an Ethernet/IPv4/TCP-UDP frame into (src IP, sport, dport, proto) |
+| `src/packet.c`  | Parse Ethernet/IPv4/IPv6 frames into (src IP, sport, dport, proto) |
 | `src/config.c`  | INI-style config parser (knockd-flavoured) |
 | `src/capture.c` | `AF_PACKET` raw-socket capture (Linux) with frame de-duplication |
 | `src/reward.c`  | nftables management: open/close the service port for a client IP |
@@ -84,6 +86,16 @@ fallback_ttl = 300        # safety max open time (close_on_connect)
 ```sh
 sudo ./sourceknock /path/to/sourceknock.conf
 ```
+
+## IPv4 & IPv6
+
+`sourceknock` captures **both** IPv4 and IPv6 traffic. IPv6 source addresses are
+keyed independently from IPv4 in the state machine, and the reward layer keeps
+separate `allowed_v4` / `allowed_v6` nftables sets (an `inet` table matches both
+families, so a single set of rules opens the port for either family). IPv6
+extension headers are walked (fragment, hop-by-hop, routing, destination
+options), bounded to 8 hops; encrypted L4 (ESP/AH) or non-TCP/UDP next headers
+are not decoded.
 
 ## Notes / limitations
 
