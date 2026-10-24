@@ -71,15 +71,21 @@ port = 22                 # hidden service port(s) to open
 protocol = tcp            # tcp or udp
 sequence = 7000,8000,9000 # ordered source-port knock
 window = 5                # whole sequence must complete within N seconds
-mode = fixed_ttl          # fixed_ttl | close_on_connect
+mode = fixed_ttl          # fixed_ttl | close_on_connect | permanent
 duration = 30             # seconds the port stays open (fixed_ttl)
 fallback_ttl = 300        # safety max open time (close_on_connect)
+admin_sequence = 9000,8000,7000  # optional revoke knock (permanent mode)
 ```
 
 - `mode = fixed_ttl` — keep the port open for `duration` seconds, then close.
 - `mode = close_on_connect` — close as soon as the client makes a connection
   (with `fallback_ttl` as a safety net so a client that never connects can't
   leave the port open forever).
+- `mode = permanent` — open the port with no timeout, so access persists past
+  any TTL without re-knocking. Pair with an optional `admin_sequence` to revoke:
+  when that separate knock completes, the client's IP is removed from the allowed
+  set and the port closes again. The admin sequence runs on its own state machine
+  (keyed by source port), so it never interferes with the primary knock.
 - `port` accepts a single port, a comma-separated list, or an inclusive range,
   e.g. `port = 22`, `port = 80, 443`, or `port = 8000-8002`. On a successful
   knock **all** listed ports are opened for the client (each port gets its own

@@ -62,7 +62,8 @@ typedef struct {
 typedef struct {
     const trigger_t *tr;          /* back-reference to config */
     reward_t   reward;
-    kn_ctx_t  *ctx;
+    kn_ctx_t  *ctx;         /* primary: completes -> open the port */
+    kn_ctx_t  *admin_ctx;   /* optional: completes -> revoke (remove IP) */
     armed_entry_t armed[64];
     int         n_armed;
 } trigger_state_t;
@@ -176,6 +177,9 @@ static void on_complete(kn_ctx_t *ctx, int family, const void *ip, void *arg)
         if (tr->mode == MODE_FIXED_TTL)
             sk_log("[%s] knock OK from %s: opened %s/%s for %.0fs",
                    tr->service, s, ports, proto, tr->duration);
+        else if (tr->mode == MODE_PERMANENT)
+            sk_log("[%s] knock OK from %s: opened %s/%s (permanent)",
+                   tr->service, s, ports, proto);
         else
             sk_log("[%s] knock OK from %s: opened %s/%s (closes on connect, "
                    "%.0fs max)", tr->service, s, ports, proto,
@@ -184,6 +188,27 @@ static void on_complete(kn_ctx_t *ctx, int family, const void *ip, void *arg)
             arm_ip(ts, family, ip, mono() + tr->fallback_ttl);
     } else {
         sk_log("[%s] knock OK from %s but reward_open FAILED", tr->service, s);
+    }
+}
+
+/* Called by the admin state machine when the revoke sequence completes.
+ * Removes `ip` from the allowed set so the port closes again. */
+static void on_revoke(kn_ctx_t *ctx, int family, const void *ip, void *arg)
+{
+    (void)ctx;
+    trigger_state_t *ts = arg;
+    const trigger_t *tr = ts->tr;
+    char s[48];
+    ipstr(family, ip, s, sizeof(s));
+    char ports[128];
+    fmt_ports(tr, ports, sizeof(ports));
+
+    if (reward_close(&ts->reward, family, ip) == 0) {
+        sk_log("[%s] admin revoke from %s: removed %s/%s",
+               tr->service, s, ports, tr->protocol == PROTO_UDP ? "udp" : "tcp");
+    } else {
+        sk_log("[%s] admin revoke from %s: %s not currently allowed",
+               tr->service, s, ports);
     }
 }
 
@@ -201,6 +226,11 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
         if (r == KNOCK_RESET)
             sk_log("[%s] incomplete/wrong knock from %s: progress reset",
                    t->tr->service, s);
+
+        /* Optional admin/revoke sequence runs on its own state machine so it
+         * never interferes with the primary knock. */
+        if (t->admin_ctx)
+            kn_feed(t->admin_ctx, pkt->family, &pkt->addr, pkt->sport, ts);
 
         /* close_on_connect: a packet to the service dest port after arming
          * is the actual connection -> close the port. */
@@ -274,6 +304,20 @@ int main(int argc, char **argv)
             return 1;
         }
         kn_set_complete(t->ctx, on_complete, t);
+
+        /* Optional admin/revoke sequence on its own state machine. */
+        if (tr->admin_seq_len > 0) {
+            knock_sequence_t admin_seq =
+                { .ports = tr->admin_sequence, .len = tr->admin_seq_len };
+            t->admin_ctx = kn_create(&admin_seq, tr->window);
+            if (!t->admin_ctx) {
+                fprintf(stderr,
+                        "admin state machine create failed for trigger '%s'\n",
+                        tr->service);
+                return 1;
+            }
+            kn_set_complete(t->admin_ctx, on_revoke, t);
+        }
     }
 
     /* capture */
@@ -293,6 +337,7 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < d.n_triggers; i++) {
         reward_flush(&d.ts[i].reward);
         kn_free(d.ts[i].ctx);
+        kn_free(d.ts[i].admin_ctx);
     }
     free(d.ts);
     sk_log("sourceknock stopped");
