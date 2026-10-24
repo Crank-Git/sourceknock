@@ -35,10 +35,20 @@ typedef enum {
 } kn_result_t;
 
 typedef struct kn_ctx kn_ctx_t;
-typedef struct { struct in_addr ip; size_t index; knock_state_t state; double start_time; } kn_client_t;
+/* Per-client progress. `family` (AF_INET/AF_INET6) selects which member of
+ * `addr` is valid; clients are keyed by (family, address). */
+typedef struct {
+    int  family;
+    union { struct in_addr v4; struct in6_addr v6; } addr;
+    size_t index;
+    knock_state_t state;
+    double start_time;
+} kn_client_t;
 
-/* Called when a client completes the sequence. */
-typedef void (*kn_complete_fn)(kn_ctx_t *ctx, const struct in_addr *ip, void *arg);
+/* Called when a client completes the sequence. `ip` points at a struct in_addr
+ * (family==AF_INET) or struct in6_addr (family==AF_INET6). */
+typedef void (*kn_complete_fn)(kn_ctx_t *ctx, int family, const void *ip,
+                               void *arg);
 
 struct kn_ctx {
     knock_sequence_t seq;          /* the secret sequence */
@@ -62,11 +72,12 @@ void      kn_free(kn_ctx_t *ctx);
 void kn_set_complete(kn_ctx_t *ctx, kn_complete_fn fn, void *arg);
 
 /* ---- the core loop, unit-testable ---- */
-/* Feed one observed packet. `now` is the timestamp (epoch seconds). */
-kn_result_t kn_feed(kn_ctx_t *ctx, const struct in_addr *ip,
+/* Feed one observed packet. `now` is the timestamp (epoch seconds). `ip` is a
+ * struct in_addr (family==AF_INET) or struct in6_addr (family==AF_INET6). */
+kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip,
                     uint16_t sport, double now);
 
 /* Look up a client's progress (NULL if none / idle). */
-kn_client_t *kn_find(kn_ctx_t *ctx, const struct in_addr *ip);
+kn_client_t *kn_find(kn_ctx_t *ctx, int family, const void *ip);
 
 #endif /* SOURCEKNOCK_STATE_H */

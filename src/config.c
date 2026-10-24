@@ -63,6 +63,57 @@ static char *parse_sequence(char *val, uint16_t **out, size_t *out_len,
     return NULL;
 }
 
+/* Parse a service-port spec into a growable uint16 array. Accepts a single
+ * port, a comma-separated list, and inclusive ranges, e.g. "22", "80, 443",
+ * or "8000-8002" (which expands to 8000, 8001, 8002). Each port must be in
+ * 1..65535. Caller frees returned array. */
+static char *parse_ports(char *val, uint16_t **out, size_t *out_len,
+                         char *err, size_t errlen)
+{
+    *out = NULL;
+    *out_len = 0;
+    size_t cap = 8;
+    uint16_t *arr = malloc(cap * sizeof(*arr));
+    if (!arr) {
+        snprintf(err, errlen, "out of memory parsing ports");
+        return err;
+    }
+    char *save = NULL;
+    char *tok = strtok_r(val, ",", &save);
+    while (tok) {
+        char *t = trim(tok);
+        if (*t == '\0') { tok = strtok_r(NULL, ",", &save); continue; }
+        char *endp = NULL;
+        long lo = strtol(t, &endp, 10);
+        long hi = lo;                 /* default: single port */
+        if (*endp == '-')             /* optional inclusive range lo-hi */
+            hi = strtol(endp + 1, &endp, 10);
+        if (*endp != '\0' || lo < 1 || lo > 65535 ||
+            hi < 1 || hi > 65535 || hi < lo) {
+            snprintf(err, errlen, "invalid port or range: '%s'", t);
+            free(arr);
+            return err;
+        }
+        for (long v = lo; v <= hi; v++) {
+            if (*out_len == cap) {
+                cap *= 2;
+                uint16_t *na = realloc(arr, cap * sizeof(*na));
+                if (!na) { free(arr); snprintf(err, errlen, "out of memory"); return err; }
+                arr = na;
+            }
+            arr[(*out_len)++] = (uint16_t)v;
+        }
+        tok = strtok_r(NULL, ",", &save);
+    }
+    if (*out_len == 0) {
+        snprintf(err, errlen, "empty port list");
+        free(arr);
+        return err;
+    }
+    *out = arr;
+    return NULL;
+}
+
 static proto_t parse_proto(const char *s, char *err, size_t errlen)
 {
     if (strcmp(s, "tcp") == 0) return PROTO_TCP;
@@ -75,7 +126,10 @@ static trigger_mode_t parse_mode(const char *s, char *err, size_t errlen)
 {
     if (strcmp(s, "fixed_ttl") == 0)  return MODE_FIXED_TTL;
     if (strcmp(s, "close_on_connect") == 0) return MODE_CLOSE_ON_CONNECT;
-    snprintf(err, errlen, "mode must be 'fixed_ttl' or 'close_on_connect' (got '%s')", s);
+    if (strcmp(s, "permanent") == 0) return MODE_PERMANENT;
+    snprintf(err, errlen,
+             "mode must be 'fixed_ttl', 'close_on_connect', or 'permanent' "
+             "(got '%s')", s);
     return (trigger_mode_t)-1;
 }
 
@@ -85,15 +139,12 @@ int config_parse_string(const char *text, char *err, size_t errlen)
     memset(&g_cfg, 0, sizeof(g_cfg));
     strncpy(g_cfg.interface, "lo", sizeof(g_cfg.interface) - 1);
 
-    strncpy(g_cfg.trigger.service, "service", sizeof(g_cfg.trigger.service) - 1);
-    g_cfg.trigger.protocol = PROTO_TCP;
-    g_cfg.trigger.mode = MODE_FIXED_TTL;
-    g_cfg.trigger.window = 5.0;
-    g_cfg.trigger.duration = 30.0;
-    g_cfg.trigger.fallback_ttl = 300.0;  /* safety max open time */
-
+    /* Growable list of triggers, one per [trigger:NAME] section. */
+    trigger_t *trigs = NULL;
+    size_t n = 0, cap = 0;
+    trigger_t *cur = NULL;   /* the trigger currently being populated */
     char line[1024];
-    char *section = NULL;   /* "global" or "trigger:NAME" */
+    char *section = NULL;    /* "global" or "trigger:NAME" */
     const char *p = text;
     char errmsg[256];
 
@@ -110,10 +161,35 @@ int config_parse_string(const char *text, char *err, size_t errlen)
 
         if (*s == '[') {
             char *end = strchr(s, ']');
-            if (!end) { snprintf(err, errlen, "malformed section header"); return -1; }
+            if (!end) { snprintf(err, errlen, "malformed section header"); goto fail; }
             *end = '\0';
             free(section);
             section = strdup(trim(s + 1));
+
+            if (strcmp(section, "global") == 0) {
+                cur = NULL;
+            } else if (strncmp(section, "trigger:", 8) == 0) {
+                if (n == cap) {
+                    size_t ncap = cap ? cap * 2 : 4;
+                    trigger_t *nt = realloc(trigs, ncap * sizeof(*trigs));
+                    if (!nt) { snprintf(err, errlen, "out of memory"); goto fail; }
+                    trigs = nt;
+                    cap = ncap;
+                }
+                memset(&trigs[n], 0, sizeof(*trigs));
+                strncpy(trigs[n].service, section + 8,
+                        sizeof(trigs[n].service) - 1);
+                trigs[n].protocol = PROTO_TCP;
+                trigs[n].mode = MODE_FIXED_TTL;
+                trigs[n].window = 5.0;
+                trigs[n].duration = 30.0;
+                trigs[n].fallback_ttl = 300.0;  /* safety max open time */
+                n++;
+                cur = &trigs[n - 1];
+            } else {
+                snprintf(err, errlen, "unknown section '%s'", trim(s + 1));
+                goto fail;
+            }
             continue;
         }
 
@@ -131,36 +207,45 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                 snprintf(err, errlen, "%s", errmsg);
                 return -1;
             }
-        } else if (strncmp(section, "trigger:", 8) == 0) {
-            trigger_t *tr = &g_cfg.trigger;
+        } else if (cur) {
             if (strcmp(key, "service") == 0) {
-                strncpy(tr->service, val, sizeof(tr->service) - 1);
+                strncpy(cur->service, val, sizeof(cur->service) - 1);
             } else if (strcmp(key, "port") == 0) {
-                char *e; long v = strtol(val, &e, 10);
-                if (*e || v < 1 || v > 65535) { snprintf(err, errlen, "invalid port"); return -1; }
-                tr->port = (uint16_t)v;
-            } else if (strcmp(key, "protocol") == 0) {
-                tr->protocol = parse_proto(val, err, errlen);
-                if (tr->protocol == PROTO_NONE) return -1;
-            } else if (strcmp(key, "sequence") == 0) {
-                size_t n;
-                char *pe = parse_sequence(val, &tr->sequence, &n, errmsg, sizeof(errmsg));
+                char *pe = parse_ports(val, &cur->ports, &cur->n_ports,
+                                       errmsg, sizeof(errmsg));
                 if (pe) { snprintf(err, errlen, "%s", pe); return -1; }
-                tr->seq_len = n;
+            } else if (strcmp(key, "protocol") == 0) {
+                cur->protocol = parse_proto(val, err, errlen);
+                if (cur->protocol == PROTO_NONE) return -1;
+            } else if (strcmp(key, "sequence") == 0) {
+                size_t cnt;
+                char *pe = parse_sequence(val, &cur->sequence, &cnt, errmsg,
+                                          sizeof(errmsg));
+                if (pe) { snprintf(err, errlen, "%s", pe); return -1; }
+                cur->seq_len = cnt;
+            } else if (strcmp(key, "admin_sequence") == 0) {
+                /* Optional revoke knock. Reuses the sequence parser; an empty
+                 * value leaves admin_sequence NULL (no revoke configured). */
+                size_t cnt;
+                char *ae = parse_sequence(val, &cur->admin_sequence, &cnt,
+                                          errmsg, sizeof(errmsg));
+                if (ae) { snprintf(err, errlen, "%s", ae); return -1; }
+                cur->admin_seq_len = cnt;
             } else if (strcmp(key, "window") == 0) {
-                char *e; tr->window = strtod(val, &e);
-                if (*e || tr->window <= 0) { snprintf(err, errlen, "invalid window"); return -1; }
+                char *e; cur->window = strtod(val, &e);
+                if (*e || cur->window <= 0) { snprintf(err, errlen, "invalid window"); return -1; }
             } else if (strcmp(key, "mode") == 0) {
-                tr->mode = parse_mode(val, err, errlen);
-                if (tr->mode == (trigger_mode_t)-1) return -1;
+                cur->mode = parse_mode(val, err, errlen);
+                if (cur->mode == (trigger_mode_t)-1) return -1;
             } else if (strcmp(key, "duration") == 0) {
-                char *e; tr->duration = strtod(val, &e);
-                if (*e || tr->duration <= 0) { snprintf(err, errlen, "invalid duration"); return -1; }
+                char *e; cur->duration = strtod(val, &e);
+                if (*e || cur->duration <= 0) { snprintf(err, errlen, "invalid duration"); return -1; }
             } else if (strcmp(key, "fallback_ttl") == 0) {
-                char *e; tr->fallback_ttl = strtod(val, &e);
-                if (*e || tr->fallback_ttl <= 0) { snprintf(err, errlen, "invalid fallback_ttl"); return -1; }
+                char *e; cur->fallback_ttl = strtod(val, &e);
+                if (*e || cur->fallback_ttl <= 0) { snprintf(err, errlen, "invalid fallback_ttl"); return -1; }
             } else {
-                snprintf(err, errlen, "unknown [trigger] key '%s'", key);
+                snprintf(err, errlen, "unknown [trigger:%s] key '%s'",
+                         cur->service, key);
                 return -1;
             }
         } else {
@@ -169,16 +254,34 @@ int config_parse_string(const char *text, char *err, size_t errlen)
         }
     }
 
-    free(section);
-
-    /* validation */
-    if (!g_cfg.trigger.sequence || g_cfg.trigger.seq_len == 0) {
-        snprintf(err, errlen, "trigger.sequence is required");
-        return -1;
+    /* validation: every trigger needs a non-empty sequence. */
+    int ok = 1;
+    for (size_t i = 0; i < n; i++) {
+        if (!trigs[i].sequence || trigs[i].seq_len == 0) {
+            snprintf(err, errlen, "trigger '%s': sequence is required",
+                     trigs[i].service);
+            ok = 0;
+            break;
+        }
     }
-    if (!g_cfg.has_trigger) { /* nothing enforced yet; accept */ }
-    g_cfg.has_trigger = 1;
+    if (!ok) goto fail;
+
+    g_cfg.triggers = trigs;
+    g_cfg.n_triggers = n;
+    free(section);
     return 0;
+
+fail:
+    for (size_t i = 0; i < n; i++) {
+        free(trigs[i].sequence);
+        free(trigs[i].ports);
+        free(trigs[i].admin_sequence);
+    }
+    free(trigs);
+    free(section);
+    g_cfg.triggers = NULL;
+    g_cfg.n_triggers = 0;
+    return -1;
 }
 
 int config_parse_file(const char *path, char *err, size_t errlen)

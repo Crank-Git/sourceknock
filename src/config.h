@@ -13,15 +13,19 @@
 
 typedef enum {
     MODE_FIXED_TTL = 0,     /* keep the port open for `duration` seconds */
-    MODE_CLOSE_ON_CONNECT   /* close as soon as the client connects */
+    MODE_CLOSE_ON_CONNECT,  /* close as soon as the client connects */
+    MODE_PERMANENT          /* open with no timeout; revoke via admin_sequence */
 } trigger_mode_t;
 
 typedef struct {
     char        service[64];
-    uint16_t    port;               /* hidden service port to open */
+    uint16_t   *ports;              /* hidden service ports to open */
+    size_t      n_ports;            /* number of entries in `ports` */
     proto_t     protocol;           /* PROTO_TCP / PROTO_UDP */
     uint16_t   *sequence;           /* source-port knock sequence */
     size_t      seq_len;
+    uint16_t   *admin_sequence;     /* optional: revoke knock (removes IP) */
+    size_t      admin_seq_len;
     double      window;             /* whole sequence must finish within this */
     trigger_mode_t mode;
     double      duration;           /* seconds, for MODE_FIXED_TTL */
@@ -30,8 +34,8 @@ typedef struct {
 
 typedef struct {
     char        interface[64];
-    trigger_t   trigger;
-    int         has_trigger;
+    trigger_t  *triggers;   /* n_triggers entries; each owns `sequence` */
+    size_t      n_triggers;
 } config_t;
 
 /* Populate *cfg from a NUL-terminated config string. Returns 0 on success,
