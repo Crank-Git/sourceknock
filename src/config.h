@@ -18,7 +18,8 @@ typedef enum {
 
 typedef struct {
     char        service[64];
-    uint16_t    port;               /* hidden service port to open */
+    uint16_t   *ports;              /* hidden service ports to open */
+    size_t      n_ports;            /* number of entries in `ports` */
     proto_t     protocol;           /* PROTO_TCP / PROTO_UDP */
     uint16_t   *sequence;           /* source-port knock sequence */
     size_t      seq_len;

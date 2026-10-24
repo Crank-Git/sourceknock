@@ -119,6 +119,28 @@ static void drop_armed(trigger_state_t *ts, int idx)
     ts->n_armed--;
 }
 
+/* Format a trigger's service ports as "22" or "80,443,8000". Bounds-checked;
+ * truncates (leaving a valid NUL-terminated string) if it would overflow. */
+static void fmt_ports(const trigger_t *tr, char *out, size_t n)
+{
+    size_t off = 0;
+    for (size_t i = 0; i < tr->n_ports && off < n - 1; i++) {
+        int w = snprintf(out + off, n - off, "%s%d", i ? "," : "",
+                         tr->ports[i]);
+        if (w < 0) break;
+        off += (size_t)w;
+    }
+    out[off] = '\0';
+}
+
+/* Is `port` one of the trigger's service ports? */
+static int port_in_list(const trigger_t *tr, uint16_t port)
+{
+    for (size_t i = 0; i < tr->n_ports; i++)
+        if (tr->ports[i] == port) return 1;
+    return 0;
+}
+
 /* Remove armed entries whose deadline has passed (safety net). */
 static void cleanup_armed(trigger_state_t *ts, double now)
 {
@@ -149,12 +171,14 @@ static void on_complete(kn_ctx_t *ctx, int family, const void *ip, void *arg)
     const char *proto = (tr->protocol == PROTO_UDP) ? "udp" : "tcp";
 
     if (reward_open(&ts->reward, family, ip, timeout) == 0) {
+        char ports[128];
+        fmt_ports(tr, ports, sizeof(ports));
         if (tr->mode == MODE_FIXED_TTL)
-            sk_log("[%s] knock OK from %s: opened %d/%s for %.0fs",
-                   tr->service, s, tr->port, proto, tr->duration);
+            sk_log("[%s] knock OK from %s: opened %s/%s for %.0fs",
+                   tr->service, s, ports, proto, tr->duration);
         else
-            sk_log("[%s] knock OK from %s: opened %d/%s (closes on connect, "
-                   "%.0fs max)", tr->service, s, tr->port, proto,
+            sk_log("[%s] knock OK from %s: opened %s/%s (closes on connect, "
+                   "%.0fs max)", tr->service, s, ports, proto,
                    tr->fallback_ttl);
         if (tr->mode == MODE_CLOSE_ON_CONNECT)
             arm_ip(ts, family, ip, mono() + tr->fallback_ttl);
@@ -181,13 +205,15 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
         /* close_on_connect: a packet to the service dest port after arming
          * is the actual connection -> close the port. */
         if (t->tr->mode == MODE_CLOSE_ON_CONNECT &&
-            pkt->dport == t->tr->port) {
+            port_in_list(t->tr, pkt->dport)) {
             int idx = find_armed(t, pkt->family, &pkt->addr);
             if (idx >= 0) {
                 reward_close(&t->reward, pkt->family, &pkt->addr);
                 drop_armed(t, idx);
-                sk_log("[%s] connect from %s to %d: closing port",
-                       t->tr->service, s, t->tr->port);
+                char ports[128];
+                fmt_ports(t->tr, ports, sizeof(ports));
+                sk_log("[%s] connect from %s to %d: closing %s",
+                       t->tr->service, s, pkt->dport, ports);
             }
         }
         cleanup_armed(t, ts);
@@ -234,8 +260,8 @@ int main(int argc, char **argv)
         char table[128];
         build_table_name(table, sizeof(table), tr->service);
 
-        if (reward_init(&t->reward, table, tr->port, tr->protocol,
-                        tr->fallback_ttl) != 0) {
+        if (reward_init(&t->reward, table, tr->ports, tr->n_ports,
+                        tr->protocol, tr->fallback_ttl) != 0) {
             fprintf(stderr, "reward init failed for trigger '%s'\n", tr->service);
             return 1;
         }

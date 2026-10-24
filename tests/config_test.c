@@ -25,7 +25,8 @@ static void test_good(void)
     CHECK_EQ_INT(strcmp(g_cfg.interface, "eth0"), 0);
     CHECK_EQ_INT(g_cfg.n_triggers, 1);
     CHECK_EQ_INT(strcmp(g_cfg.triggers[0].service, "ssh"), 0);
-    CHECK_EQ_INT(g_cfg.triggers[0].port, 22);
+    CHECK_EQ_INT(g_cfg.triggers[0].n_ports, 1);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[0], 22);
     CHECK_EQ_INT(g_cfg.triggers[0].protocol, PROTO_TCP);
     CHECK_EQ_INT(g_cfg.triggers[0].seq_len, 3);
     CHECK_EQ_INT(g_cfg.triggers[0].sequence[0], 7000);
@@ -105,13 +106,15 @@ static void test_multi_trigger(void)
     CHECK_EQ_INT(g_cfg.n_triggers, 2);
     /* trigger 0: ssh / tcp / 22 / 2 ports */
     CHECK_EQ_INT(strcmp(g_cfg.triggers[0].service, "ssh"), 0);
-    CHECK_EQ_INT(g_cfg.triggers[0].port, 22);
+    CHECK_EQ_INT(g_cfg.triggers[0].n_ports, 1);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[0], 22);
     CHECK_EQ_INT(g_cfg.triggers[0].protocol, PROTO_TCP);
     CHECK_EQ_INT(g_cfg.triggers[0].seq_len, 2);
     CHECK_EQ_INT(g_cfg.triggers[0].mode, MODE_FIXED_TTL);
     /* trigger 1: web / udp / 8080 / 3 ports */
     CHECK_EQ_INT(strcmp(g_cfg.triggers[1].service, "web"), 0);
-    CHECK_EQ_INT(g_cfg.triggers[1].port, 8080);
+    CHECK_EQ_INT(g_cfg.triggers[1].n_ports, 1);
+    CHECK_EQ_INT(g_cfg.triggers[1].ports[0], 8080);
     CHECK_EQ_INT(g_cfg.triggers[1].protocol, PROTO_UDP);
     CHECK_EQ_INT(g_cfg.triggers[1].seq_len, 3);
     CHECK_EQ_INT(g_cfg.triggers[1].mode, MODE_CLOSE_ON_CONNECT);
@@ -129,6 +132,66 @@ static void test_multi_trigger_missing_seq(void)
     CHECK_EQ_INT(g_cfg.n_triggers, 0);  /* nothing left valid on error */
 }
 
+/* A single port still parses (backwards compatible). */
+static void test_single_port(void)
+{
+    char err[256];
+    const char *c =
+        "[global]\ninterface = lo\n"
+        "[trigger:t]\nport = 2222\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK_EQ_INT(config_parse_string(c, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.triggers[0].n_ports, 1);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[0], 2222);
+}
+
+/* Acceptance: `port` accepts a comma-separated list and inclusive ranges, all
+ * expanded and validated. */
+static const char *multi_port_cfg =
+    "[global]\ninterface = lo\n"
+    "[trigger:multi]\nport = 22, 80, 443, 8000-8002\n"
+    "protocol = tcp\nsequence = 1,2,3\n";
+
+static void test_multi_port(void)
+{
+    char err[256];
+    CHECK_EQ_INT(config_parse_string(multi_port_cfg, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.triggers[0].n_ports, 6);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[0], 22);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[1], 80);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[2], 443);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[3], 8000);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[4], 8001);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[5], 8002);
+}
+
+/* Invalid port specs are rejected: out of range, malformed, reversed range,
+ * multi-dash, and empty. */
+static void test_bad_ports(void)
+{
+    char err[256];
+    const char *c0 =
+        "[global]\ninterface = lo\n[trigger:t]\nport = 0\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c0, err, sizeof(err)) == -1);
+    const char *c1 =
+        "[global]\ninterface = lo\n[trigger:t]\nport = 70000\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c1, err, sizeof(err)) == -1);
+    const char *c2 =
+        "[global]\ninterface = lo\n[trigger:t]\nport = abc\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c2, err, sizeof(err)) == -1);
+    const char *c3 =
+        "[global]\ninterface = lo\n[trigger:t]\nport = 80-\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c3, err, sizeof(err)) == -1);
+    const char *c4 =
+        "[global]\ninterface = lo\n[trigger:t]\nport = 80-70\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c4, err, sizeof(err)) == -1);
+    const char *c5 =
+        "[global]\ninterface = lo\n[trigger:t]\nport = 80-90-100\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c5, err, sizeof(err)) == -1);
+    const char *c6 =
+        "[global]\ninterface = lo\n[trigger:t]\nport =\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c6, err, sizeof(err)) == -1);
+}
+
 int main(void)
 {
     printf("== config parser tests ==\n");
@@ -140,5 +203,8 @@ int main(void)
     TEST_RUN(test_bad_port);
     TEST_RUN(test_multi_trigger);
     TEST_RUN(test_multi_trigger_missing_seq);
+    TEST_RUN(test_single_port);
+    TEST_RUN(test_multi_port);
+    TEST_RUN(test_bad_ports);
     TEST_SUMMARY();
 }

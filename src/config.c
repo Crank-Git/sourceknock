@@ -63,6 +63,57 @@ static char *parse_sequence(char *val, uint16_t **out, size_t *out_len,
     return NULL;
 }
 
+/* Parse a service-port spec into a growable uint16 array. Accepts a single
+ * port, a comma-separated list, and inclusive ranges, e.g. "22", "80, 443",
+ * or "8000-8002" (which expands to 8000, 8001, 8002). Each port must be in
+ * 1..65535. Caller frees returned array. */
+static char *parse_ports(char *val, uint16_t **out, size_t *out_len,
+                         char *err, size_t errlen)
+{
+    *out = NULL;
+    *out_len = 0;
+    size_t cap = 8;
+    uint16_t *arr = malloc(cap * sizeof(*arr));
+    if (!arr) {
+        snprintf(err, errlen, "out of memory parsing ports");
+        return err;
+    }
+    char *save = NULL;
+    char *tok = strtok_r(val, ",", &save);
+    while (tok) {
+        char *t = trim(tok);
+        if (*t == '\0') { tok = strtok_r(NULL, ",", &save); continue; }
+        char *endp = NULL;
+        long lo = strtol(t, &endp, 10);
+        long hi = lo;                 /* default: single port */
+        if (*endp == '-')             /* optional inclusive range lo-hi */
+            hi = strtol(endp + 1, &endp, 10);
+        if (*endp != '\0' || lo < 1 || lo > 65535 ||
+            hi < 1 || hi > 65535 || hi < lo) {
+            snprintf(err, errlen, "invalid port or range: '%s'", t);
+            free(arr);
+            return err;
+        }
+        for (long v = lo; v <= hi; v++) {
+            if (*out_len == cap) {
+                cap *= 2;
+                uint16_t *na = realloc(arr, cap * sizeof(*na));
+                if (!na) { free(arr); snprintf(err, errlen, "out of memory"); return err; }
+                arr = na;
+            }
+            arr[(*out_len)++] = (uint16_t)v;
+        }
+        tok = strtok_r(NULL, ",", &save);
+    }
+    if (*out_len == 0) {
+        snprintf(err, errlen, "empty port list");
+        free(arr);
+        return err;
+    }
+    *out = arr;
+    return NULL;
+}
+
 static proto_t parse_proto(const char *s, char *err, size_t errlen)
 {
     if (strcmp(s, "tcp") == 0) return PROTO_TCP;
@@ -157,9 +208,9 @@ int config_parse_string(const char *text, char *err, size_t errlen)
             if (strcmp(key, "service") == 0) {
                 strncpy(cur->service, val, sizeof(cur->service) - 1);
             } else if (strcmp(key, "port") == 0) {
-                char *e; long v = strtol(val, &e, 10);
-                if (*e || v < 1 || v > 65535) { snprintf(err, errlen, "invalid port"); return -1; }
-                cur->port = (uint16_t)v;
+                char *pe = parse_ports(val, &cur->ports, &cur->n_ports,
+                                       errmsg, sizeof(errmsg));
+                if (pe) { snprintf(err, errlen, "%s", pe); return -1; }
             } else if (strcmp(key, "protocol") == 0) {
                 cur->protocol = parse_proto(val, err, errlen);
                 if (cur->protocol == PROTO_NONE) return -1;
@@ -210,7 +261,10 @@ int config_parse_string(const char *text, char *err, size_t errlen)
     return 0;
 
 fail:
-    for (size_t i = 0; i < n; i++) free(trigs[i].sequence);
+    for (size_t i = 0; i < n; i++) {
+        free(trigs[i].sequence);
+        free(trigs[i].ports);
+    }
     free(trigs);
     free(section);
     g_cfg.triggers = NULL;
