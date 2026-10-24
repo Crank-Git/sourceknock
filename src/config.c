@@ -60,7 +60,6 @@ static char *parse_sequence(char *val, uint16_t **out, size_t *out_len,
         return err;
     }
     *out = arr;
-    *out_len = *out_len;
     return NULL;
 }
 
@@ -138,7 +137,7 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                 strncpy(tr->service, val, sizeof(tr->service) - 1);
             } else if (strcmp(key, "port") == 0) {
                 char *e; long v = strtol(val, &e, 10);
-                if (*e || v < 0 || v > 65535) { snprintf(err, errlen, "invalid port"); return -1; }
+                if (*e || v < 1 || v > 65535) { snprintf(err, errlen, "invalid port"); return -1; }
                 tr->port = (uint16_t)v;
             } else if (strcmp(key, "protocol") == 0) {
                 tr->protocol = parse_proto(val, err, errlen);

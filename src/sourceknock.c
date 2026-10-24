@@ -204,6 +204,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    cap.stop = &g_stop;
+
     sk_log("listening for knocks on '%s'...", g_cfg.interface);
     int rc = capture_run(&cap);
 

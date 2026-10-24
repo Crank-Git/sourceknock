@@ -97,7 +97,11 @@ int capture_run(capture_t *cap)
         ssize_t n = recvfrom(cap->fd, buf, sizeof(buf), 0,
                              (struct sockaddr *)&sll, &sll_len);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                if (cap->stop && *cap->stop)
+                    return 0;   /* clean shutdown requested */
+                continue;
+            }
             fprintf(stderr, "capture: recvfrom(): %s\n", strerror(errno));
             return -1;
         }

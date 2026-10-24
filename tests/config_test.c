@@ -76,6 +76,19 @@ static void test_bad_protocol(void)
     CHECK(config_parse_string(c, err, sizeof(err)) == -1);
 }
 
+static void test_bad_port(void)
+{
+    char err[256];
+    const char *c =
+        "[global]\ninterface = lo\n"
+        "[trigger:t]\nport = 0\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c, err, sizeof(err)) == -1);
+    const char *c2 =
+        "[global]\ninterface = lo\n"
+        "[trigger:t]\nport = 70000\nprotocol = tcp\nsequence = 1,2\n";
+    CHECK(config_parse_string(c2, err, sizeof(err)) == -1);
+}
+
 int main(void)
 {
     printf("== config parser tests ==\n");
@@ -84,5 +97,6 @@ int main(void)
     TEST_RUN(test_bad_sequence);
     TEST_RUN(test_missing_sequence);
     TEST_RUN(test_bad_protocol);
+    TEST_RUN(test_bad_port);
     TEST_SUMMARY();
 }

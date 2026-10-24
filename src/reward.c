@@ -15,6 +15,9 @@ static int run_nft(char **args)
 {
     pid_t pid = fork();
     if (pid == 0) {
+        /* The daemon runs as root; don't let a hostile PATH redirect the
+         * nft binary. Pin a sane PATH in the child before exec. */
+        setenv("PATH", "/usr/sbin:/sbin:/usr/bin:/bin", 1);
         execvp("nft", args);
         fprintf(stderr, "reward: exec nft failed: %s\n", strerror(errno));
         _exit(127);

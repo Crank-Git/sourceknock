@@ -7,6 +7,7 @@
 #ifndef SOURCEKNOCK_CAPTURE_H
 #define SOURCEKNOCK_CAPTURE_H
 
+#include <signal.h>
 #include "packet.h"
 
 /* Called for every parsed TCP/UDP packet. `ts` is packet arrival time. */
@@ -17,6 +18,10 @@ typedef struct {
     kn_packet_fn on_packet;
     void       *arg;
     int         fd;              /* AF_PACKET fd, -1 on error */
+    /* If non-NULL, capture_run polls *stop after each interrupted read and
+     * returns 0 (clean) as soon as it is non-zero. Wired to the daemon's
+     * signal handler so SIGINT/SIGTERM shut the daemon down. */
+    volatile sig_atomic_t *stop;
 } capture_t;
 
 /* Open a raw AF_PACKET socket on `interface`. Returns 0 on success.
@@ -24,7 +29,7 @@ typedef struct {
 int capture_open(capture_t *cap, const char *iface,
                  kn_packet_fn fn, void *arg);
 
-/* Read and dispatch packets until capture_stop() is called (blocks). */
+/* Read and dispatch packets until *cap->stop becomes non-zero (blocks). */
 int capture_run(capture_t *cap);
 
 /* Close the socket. */

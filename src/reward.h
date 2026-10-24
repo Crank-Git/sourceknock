@@ -6,10 +6,10 @@
  * temporarily accepts it for IPs in an "allowed" set.
  *
  *   table inet sourceknock {
- *     set allowed { type in_addr; flags timeout size 256; }
+ *     set allowed { type ipv4_addr; flags timeout size 256; }
  *     chain service {
  *       type filter hook input priority 0; policy accept (other ports untouched)
- *       ip saddr @allowed-set <proto> dport <port> accept
+ *       ip saddr @allowed <proto> dport <port> accept
  *       <proto> dport <port> drop (port closed by default for everyone else)
  *     }
  *   }
