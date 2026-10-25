@@ -128,8 +128,47 @@ admin_sequence = 9000,8000,7000  # optional revoke knock (permanent mode)
 
 ## Running
 
+Run it directly (needs root / `CAP_NET_RAW` for the raw socket and
+`CAP_NET_ADMIN` for nftables):
+
 ```sh
 sudo ./sourceknock /path/to/sourceknock.conf
+```
+
+### systemd
+
+On systemd hosts, install the daemon and its units with `make install` (needs
+root). This places the binary in `/usr/local/bin` and the units in
+`/etc/systemd/system`, then reloads systemd:
+
+```sh
+sudo make install
+```
+
+The units run the daemon as the unprivileged `sourceknock` user, granted only
+`CAP_NET_RAW` and `CAP_NET_ADMIN` (not root). Create that user first if it
+doesn't exist:
+
+```sh
+sudo useradd --system --user-group --home-dir /var/lib/sourceknock --no-create-home sourceknock
+```
+
+Then drop in a config at `/etc/sourceknock/sourceknock.conf` and start it:
+
+```sh
+# default unit -> /etc/sourceknock/sourceknock.conf
+sudo systemctl enable --now sourceknock
+
+# or a per-instance config via the template unit:
+#   /etc/sourceknock/myconf.conf
+#   sudo systemctl enable --now sourceknock@myconf
+```
+
+Stop / remove:
+
+```sh
+sudo systemctl disable --now sourceknock   # then:
+sudo make uninstall
 ```
 
 ## IPv4 & IPv6

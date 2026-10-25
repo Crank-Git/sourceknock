@@ -5,6 +5,8 @@
 #   make daemon     build the sourceknock daemon (requires Linux headers)
 #   make fuzz       build + run the libFuzzer pkt_parse target (Linux, needs
 #                   clang with libFuzzer + AddressSanitizer)
+#   make install    install the daemon + systemd units (Linux, needs root)
+#   make uninstall  remove them again
 #   make clean
 
 CC      ?= cc
@@ -40,6 +42,17 @@ DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
 TESTS := state_test packet_test config_test close_test
 
+# ---- install (Linux only: ships the systemd units) ----
+# Paths are overridable, e.g. `make install PREFIX=/usr BINDIR=/usr/bin`.
+# DESTDIR supports packaging/rubber-stamping (no files touch the live tree).
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+SYSDIR  ?= /etc/systemd/system
+CONFDIR ?= /etc/sourceknock
+UNIT_DIR := contrib/systemd
+# The units run as the unprivileged 'sourceknock' user (see README); that user
+# must exist before the service starts.
+
 # ---- fuzzing (Linux only: needs libFuzzer + ASan) ----
 FUZZ_DIR     := tests/fuzz
 FUZZ_SRC     := $(FUZZ_DIR)/fuzz_pkt_parse.cc
@@ -49,7 +62,7 @@ FUZZ_CXXFLAGS := -O2 -g -std=c++14 -fsanitize=fuzzer,address -Isrc
 # libFuzzer is a clang feature; gcc lacks the runtime.
 FUZZ_CC ?= clang
 
-.PHONY: all test daemon fuzz fuzz-build fuzz-seeds clean format check-format tidy
+.PHONY: all test daemon fuzz fuzz-build fuzz-seeds clean format check-format tidy install uninstall
 
 all: test
 
@@ -121,8 +134,35 @@ daemon: sourceknock
 sourceknock: $(DAEMON_OBJ)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-%.o: %.c
-	$(CC) $(CFLAGS) -Isrc -c $< -o $@
+# ---- install (Linux only: ships the systemd units) ----
+# Installs the daemon binary and the systemd units, then reloads systemd.
+# Requires root. The unit runs as the unprivileged 'sourceknock' user, which must
+# exist before the service is started (see the README). Enable with:
+#   systemctl enable --now sourceknock        # default config
+#   systemctl enable --now sourceknock@myconf # per-instance (template)
+install: daemon
+	install -d -m 0755 $(DESTDIR)$(BINDIR)
+	install -m 0755 sourceknock $(DESTDIR)$(BINDIR)/sourceknock
+	install -d -m 0755 $(DESTDIR)$(SYSDIR)
+	install -m 0644 $(UNIT_DIR)/sourceknock.service $(DESTDIR)$(SYSDIR)/
+	install -m 0644 $(UNIT_DIR)/sourceknock@.service $(DESTDIR)$(SYSDIR)/
+	install -d -m 0755 $(DESTDIR)$(CONFDIR)
+	@if command -v systemctl >/dev/null 2>&1; then \
+		systemctl daemon-reload; \
+	else \
+		echo "install: systemctl not found; enable manually:"; \
+		echo "          systemctl enable --now sourceknock"; \
+	fi
+
+uninstall:
+	@if command -v systemctl >/dev/null 2>&1; then \
+		systemctl disable --now sourceknock.service 2>/dev/null || true; \
+		systemctl disable --now sourceknock@.service 2>/dev/null || true; \
+		systemctl daemon-reload; \
+	fi
+	rm -f $(DESTDIR)$(SYSDIR)/sourceknock.service
+	rm -f $(DESTDIR)$(SYSDIR)/sourceknock@.service
+	rm -f $(DESTDIR)$(BINDIR)/sourceknock
 
 clean:
 	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock tests/*.o $(FUZZ_BIN) $(FUZZ_DIR)/*.o
