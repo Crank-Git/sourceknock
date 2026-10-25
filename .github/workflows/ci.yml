@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macOS-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run unit tests (cross-platform core)
         run: make test
@@ -65,7 +65,7 @@ jobs:
     name: Format / lint / secrets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install pinned clang-format
         # Pinned via pip so the exact binary is reproducible across runners
