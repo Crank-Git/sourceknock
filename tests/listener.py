@@ -13,7 +13,12 @@ import time
 
 HOST = os.environ.get("SK_LISTEN_HOST", "10.20.0.2")
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 2222
-ready = sys.argv[2] if len(sys.argv) > 2 else "/tmp/skdev/listen_up"
+# The ready path is required: the harness passes a private temp-file path so
+# the listener never depends on a pre-existing scratch directory.
+if len(sys.argv) < 3:
+    sys.stderr.write("usage: listener.py <port> <ready_file>\n")
+    sys.exit(2)
+ready = sys.argv[2]
 end = time.time() + 90
 
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

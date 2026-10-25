@@ -25,8 +25,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="$(cd "$HERE/.." && pwd)/sourceknock"
 DRIVER="$HERE/driver.py"
 LISTENER="$HERE/listener.py"
-LOG=/tmp/skdev/daemon.log
-UP=/tmp/skdev/listen_up
+# Work in a private temp dir so the test is hermetic: it must run with no
+# pre-existing scratch dir (e.g. on CI's ubuntu runner). WORK is removed by
+# cleanup().
+WORK="$(mktemp -d)"
+LOG="$WORK/daemon.log"
+UP="$WORK/listen_up"
 
 pass=0; fail=0
 check() { # label expected_open(1/0)
@@ -55,6 +59,14 @@ cleanup() {
   sudo ip netns del e2etest 2>/dev/null
   sudo ip link del e2etest-c 2>/dev/null
   sudo ip link del e2etest-s 2>/dev/null
+  # On failure, leave a trail so the next CI run is self-explaining.
+  if [ "${fail:-0}" -ne 0 ]; then
+    echo "----- daemon.log (last 30) -----"
+    tail -n 30 "$WORK/daemon.log" 2>/dev/null
+    echo "----- listener.log (last 30) -----"
+    tail -n 30 "$WORK/listener.log" 2>/dev/null
+  fi
+  rm -rf "$WORK"
 }
 trap cleanup EXIT
 
@@ -71,7 +83,7 @@ sudo ip netns exec "$NS" ip link set e2e-s up
 sudo ip netns exec "$NS" ip link set lo up
 
 rm -f "$UP"
-SK_LISTEN_HOST=$SERVER sudo ip netns exec "$NS" setsid python3 "$LISTENER" "$PORT" "$UP" >/tmp/skdev/listener.log 2>&1 </dev/null &
+SK_LISTEN_HOST=$SERVER sudo ip netns exec "$NS" setsid python3 "$LISTENER" "$PORT" "$UP" >"$WORK/listener.log" 2>&1 </dev/null &
 for _ in $(seq 1 50); do [ -f "$UP" ] && break; sleep 0.1; done
 [ -f "$UP" ] || { echo "FAIL listener never came up"; fail=$((fail+1)); echo "RESULT: $pass passed, $fail failed"; exit 1; }
 
