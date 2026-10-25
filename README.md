@@ -1,5 +1,8 @@
 # sourceknock
 
+[![CI](https://github.com/Crank-Git/sourceknock/actions/workflows/ci.yml/badge.svg)](https://github.com/Crank-Git/sourceknock/actions/workflows/ci.yml)
+[![Release](https://github.com/Crank-Git/sourceknock/actions/workflows/release.yml/badge.svg)](https://github.com/Crank-Git/sourceknock/actions/workflows/release.yml)
+
 A port-knocking daemon that knocks via **source ports** instead of destination
 ports. Standard port knocking encodes the secret in the *destination* port
 sequence — a network scanner sees a client hammering a list of ports and can
@@ -58,6 +61,31 @@ make daemon    # build the sourceknock daemon (Linux only; needs kernel headers)
 ```
 
 Integration testing needs Linux + root (for `AF_PACKET` and `nft`).
+
+## Continuous Integration
+
+CI runs on every push and pull request across a Linux and a macOS runner
+(GitHub Actions):
+
+- **Unit tests** (`make test`) run on both — the core (state machine, packet
+  parsing, config) is cross-platform.
+- **Daemon build** (`make daemon`) runs on Linux, where the `AF_PACKET` /
+  nftables layers compile.
+
+Workflow definitions live in `.github/workflows/`.
+
+## Releases
+
+Cut a release by pushing a `v*` tag. CI builds the Linux daemon and publishes
+it as a GitHub Release artifact:
+
+```sh
+git tag -a v1.0.0 -m "sourceknock 1.0.0"
+git push origin v1.0.0
+```
+
+The release attaches a `sourceknock` binary built on `ubuntu-latest`. (The
+daemon is Linux-only; the cross-platform unit tests run in CI on every change.)
 
 ## Configuration
 
