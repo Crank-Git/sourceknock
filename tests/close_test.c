@@ -1,8 +1,8 @@
 /* close_test.c - unit tests for the close_on_connect decision. */
 #include <string.h>
 
-#include "test.h"
 #include "close.h"
+#include "test.h"
 
 static trigger_t make_trigger(trigger_mode_t mode, const uint16_t *ports,
                               size_t n)

@@ -9,11 +9,11 @@
  *     set allowed_v4 { type ipv4_addr; flags timeout size 256; }
  *     set allowed_v6 { type ipv6_addr; flags timeout size 256; }
  *     chain service {
- *       type filter hook input priority 0; policy accept (other ports untouched)
- *       # one accept (per family) + one drop rule per service port:
- *       ip saddr @allowed_v4 <proto> dport <port1> accept
- *       ip6 saddr @allowed_v6 <proto> dport <port1> accept
- *       <proto> dport <port1> drop (port closed by default for everyone else)
+ *       type filter hook input priority 0; policy accept (other ports
+ * untouched) # one accept (per family) + one drop rule per service port: ip
+ * saddr @allowed_v4 <proto> dport <port1> accept ip6 saddr @allowed_v6 <proto>
+ * dport <port1> accept <proto> dport <port1> drop (port closed by default for
+ * everyone else)
  *       ... (repeat for port2, port3, ...) *
  *     }
  *   }
@@ -21,20 +21,21 @@
 #ifndef SOURCEKNOCK_REWARD_H
 #define SOURCEKNOCK_REWARD_H
 
-#include <stdint.h>
-#include <netinet/in.h>
 #include "packet.h"
+#include <netinet/in.h>
+#include <stdint.h>
 
-typedef struct {
-    char        table[64];
-    char        chain[64];
-    char        set_v4[64];   /* allowed IPv4 set */
-    char        set_v6[64];   /* allowed IPv6 set */
-    const uint16_t *ports;    /* n_ports service ports to open (borrowed) */
-    size_t     n_ports;
-    proto_t     proto;
-    double      fallback_ttl;   /* safety max open time (close_on_connect) */
-    int         initialized;
+typedef struct
+{
+    char table[64];
+    char chain[64];
+    char set_v4[64];       /* allowed IPv4 set */
+    char set_v6[64];       /* allowed IPv6 set */
+    const uint16_t *ports; /* n_ports service ports to open (borrowed) */
+    size_t n_ports;
+    proto_t proto;
+    double fallback_ttl; /* safety max open time (close_on_connect) */
+    int initialized;
 } reward_t;
 
 /* Create table/set/chain if missing. Idempotent. Returns 0 on success.

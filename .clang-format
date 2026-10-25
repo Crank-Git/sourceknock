@@ -1,0 +1,13 @@
+---
+Language:        C
+BasedOnStyle:  LLVM
+IndentWidth:   4
+TabWidth:      4
+UseTab:        Never
+ColumnLimit:   80
+BreakBeforeBraces: Allman
+# Keep the original include order. Reordering <net/if.h> ahead of
+# <linux/if.h> trips a IFF_* enumerator redeclaration on Linux, so the
+# project's existing order must be preserved.
+SortIncludes: false
+...
