@@ -1,5 +1,8 @@
 # sourceknock
 
+[![CI](https://github.com/Crank-Git/sourceknock/actions/workflows/ci.yml/badge.svg)](https://github.com/Crank-Git/sourceknock/actions/workflows/ci.yml)
+[![Release](https://github.com/Crank-Git/sourceknock/actions/workflows/release.yml/badge.svg)](https://github.com/Crank-Git/sourceknock/actions/workflows/release.yml)
+
 A port-knocking daemon that knocks via **source ports** instead of destination
 ports. Standard port knocking encodes the secret in the *destination* port
 sequence — a network scanner sees a client hammering a list of ports and can
@@ -59,6 +62,31 @@ make daemon    # build the sourceknock daemon (Linux only; needs kernel headers)
 
 Integration testing needs Linux + root (for `AF_PACKET` and `nft`).
 
+## Continuous Integration
+
+CI runs on every push and pull request across a Linux and a macOS runner
+(GitHub Actions):
+
+- **Unit tests** (`make test`) run on both — the core (state machine, packet
+  parsing, config) is cross-platform.
+- **Daemon build** (`make daemon`) runs on Linux, where the `AF_PACKET` /
+  nftables layers compile.
+
+Workflow definitions live in `.github/workflows/`.
+
+## Releases
+
+Cut a release by pushing a `v*` tag. CI builds the Linux daemon and publishes
+it as a GitHub Release artifact:
+
+```sh
+git tag -a v1.0.0 -m "sourceknock 1.0.0"
+git push origin v1.0.0
+```
+
+The release attaches a `sourceknock` binary built on `ubuntu-latest`. (The
+daemon is Linux-only; the cross-platform unit tests run in CI on every change.)
+
 ## Configuration
 
 ```ini
@@ -76,6 +104,10 @@ duration = 30             # seconds the port stays open (fixed_ttl)
 fallback_ttl = 300        # safety max open time (close_on_connect)
 admin_sequence = 9000,8000,7000  # optional revoke knock (permanent mode)
 ```
+
+> **Note:** the parser strips only full-line comments (lines starting with `#`
+> or `;`). Inline comments after a value are **not** stripped, so keep value
+> lines free of trailing `#`/`;` (see the notes in `examples/`).
 
 - `mode = fixed_ttl` — keep the port open for `duration` seconds, then close.
 - `mode = close_on_connect` — close as soon as the client makes a connection
@@ -100,8 +132,47 @@ admin_sequence = 9000,8000,7000  # optional revoke knock (permanent mode)
 
 ## Running
 
+Run it directly (needs root / `CAP_NET_RAW` for the raw socket and
+`CAP_NET_ADMIN` for nftables):
+
 ```sh
 sudo ./sourceknock /path/to/sourceknock.conf
+```
+
+### systemd
+
+On systemd hosts, install the daemon and its units with `make install` (needs
+root). This places the binary in `/usr/local/bin` and the units in
+`/etc/systemd/system`, then reloads systemd:
+
+```sh
+sudo make install
+```
+
+The units run the daemon as the unprivileged `sourceknock` user, granted only
+`CAP_NET_RAW` and `CAP_NET_ADMIN` (not root). Create that user first if it
+doesn't exist:
+
+```sh
+sudo useradd --system --user-group --home-dir /var/lib/sourceknock --no-create-home sourceknock
+```
+
+Then drop in a config at `/etc/sourceknock/sourceknock.conf` and start it:
+
+```sh
+# default unit -> /etc/sourceknock/sourceknock.conf
+sudo systemctl enable --now sourceknock
+
+# or a per-instance config via the template unit:
+#   /etc/sourceknock/myconf.conf
+#   sudo systemctl enable --now sourceknock@myconf
+```
+
+Stop / remove:
+
+```sh
+sudo systemctl disable --now sourceknock   # then:
+sudo make uninstall
 ```
 
 ## IPv4 & IPv6
@@ -121,3 +192,63 @@ are not decoded.
 - De-duplication drops near-identical frames within a 0.5s window, which
   handles loopback/interfaces that deliver each frame twice.
 - Source ports are spoofable — this is obfuscation, not authentication.
+
+## Troubleshooting
+
+### The daemon won't start / "capture open failed (need root?)"
+
+`AF_PACKET` raw sockets need root or `CAP_NET_RAW`, and programming nft rules
+needs `CAP_NET_ADMIN`. Run it as root, or under the systemd unit (which grants
+only those two capabilities to the unprivileged `sourceknock` user — see
+[Running](#running)). A plain `./sourceknock conf` without privileges fails at
+capture open.
+
+### The port never opens
+
+- **Wrong interface.** `[global] interface =` must be the daemon's capture
+  interface (the one that sees the client's frames), not the client's.
+- **No knock seen.** The knock is encoded in the client's **source** port, not
+  the destination port. Verify the daemon logs `listening for knocks` and that
+  your client binds each probe to the right source port.
+- **Sequence/window mismatch.** The ordered source-port sequence and the
+  window must match between client and daemon. See the samples in
+  [examples](examples) and the full field reference in the
+  [README Configuration](#configuration) section (or `man 1 sourceknock`).
+- **nftables missing or too old.** The daemon needs `nft` and modern set
+  syntax (validated on 1.0.9). Install nftables (`apt install nftables`), and
+  note that on GitHub's ubuntu runner the `nftables` package must be installed
+  explicitly (the `nft` package name does not exist there).
+
+### The port stays open (TTL / close-on-connect not firing)
+
+- In `fixed_ttl` mode the port closes after `duration` seconds (nft element
+  timeout). In `close_on_connect` it closes on the first connection, with
+  `fallback_ttl` as a safety net.
+- For UDP there is no handshake, so `close_on_connect` fires on the first
+  subsequent UDP packet to the service port — the arming knock itself does not
+  close the port the instant it opens.
+
+### Checking what the daemon programmed
+
+The daemon namespaces its nftables table by service name (`inet
+sourceknock_<service>`), with separate `allowed_v4` / `allowed_v6` sets:
+
+```sh
+nft list set inet sourceknock_ssh allowed_v4
+```
+
+If a set never appears or the table is missing, the daemon likely failed to
+initialise reward (see above). `journalctl -u sourceknock` (or `-u
+sourceknock@<instance>`) shows the daemon's own logs.
+
+### IPv6 notes
+
+IPv6 source addresses are keyed independently from IPv4, and the daemon walks
+IPv6 extension headers (bounded to 8 hops). Encrypted L4 (ESP/AH) or
+non-TCP/UDP next headers are not decoded, so a knock over those protocols
+cannot be matched. Ensure your client actually sends over the family you
+configured.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Crank-Git.

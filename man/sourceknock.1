@@ -1,0 +1,210 @@
+.TH SOURCEKNOCK 1 "2026-10-25" "sourceknock 1.0" "sourceknock"
+.SH NAME
+sourceknock \- source-port port-knocking daemon
+.SH SYNOPSIS
+.B sourceknock
+.RI [ CONFIGFILE ]
+.SH DESCRIPTION
+.B sourceknock
+is a port-knocking daemon that unlocks a hidden service port by watching the
+.B source ports
+of incoming packets, rather than the destination ports that
+traditional knocking encodes the secret in.
+.PP
+Standard port knocking puts the knock sequence in the
+.I destination
+port, so a scanner watching destination ports sees a client stepping through a
+fixed list of ports and can fingerprint it.
+.B sourceknock
+keeps the destination port fixed and varies the
+.I source
+port instead, so the knock blends in with ordinary traffic.
+.PP
+How it works:
+.RS 4
+.IP \(bu 2
+The daemon captures packets on an interface using an
+.B AF_PACKET
+raw socket (requires root or
+.B CAP_NET_RAW ).
+.IP \(bu 2
+For each packet it decodes the source port and source IP from both IPv4 and
+IPv6 frames (IPv6 extension headers are walked, bounded to 8 hops).
+.IP \(bu 2
+A per-client state machine watches the stream of source ports and waits for the
+configured ordered sequence to arrive within the timing window.
+.IP \(bu 2
+On a successful knock the daemon programs
+.B nftables
+to let that client's source IP reach the hidden service port, then closes it
+again after a fixed TTL or on the first connection.
+.RE
+.PP
+.B Threat model.
+Source ports are trivially spoofable, like any L4 header field.
+This gives
+.B sourceknock
+stealth and obfuscation (the attack surface stays invisible; noisy scans look
+normal) but
+.B not
+authentication. Rely on your service's own authentication (SSH keys, passwords)
+for real security; do not treat
+.B sourceknock
+as the only control.
+.SH ARGUMENTS
+The daemon takes a single optional argument: the path to its configuration
+file. If omitted it defaults to
+.BI /etc/sourceknock/sourceknock.conf .
+See
+.IR CONFIGURATION
+below and the samples in
+.BR examples/ .
+.SH CONFIGURATION
+Configuration is INI-style (knockd-flavoured) with a
+.B [global]
+section and one
+.B [trigger:NAME]
+section per hidden service. The minimum per trigger is a
+.B port
+and a
+.BR sequence ;
+the fields are:
+.RS 4
+.IP \(bu 2
+.B service
+Human-readable name; also used to namespace the nftables table
+(``inet sourceknock_<service>'').
+.IP \(bu 2
+.B port
+The hidden service port(s) to open. Accepts a single port, a comma-separated
+list, or an inclusive range, e.g.
+.BI 22 ,
+.BI "80, 443" ,
+or
+.BI "8000-8002" .
+.IP \(bu 2
+.B protocol
+.BI tcp
+or
+.BI udp .
+.IP \(bu 2
+.B sequence
+The ordered source-port knock, e.g.
+.BI 7000,8000,9000 .
+.IP \(bu 2
+.B window
+Seconds within which the whole sequence must complete (default 5).
+.IP \(bu 2
+.B mode
+One of
+.BI fixed_ttl ,
+.BI close_on_connect ,
+or
+.BI permanent .
+.IP \(bu 2
+.B duration
+Seconds the port stays open with
+.BI fixed_ttl
+(default 30).
+.IP \(bu 2
+.B fallback_ttl
+Safety maximum open time for
+.BI close_on_connect
+so a client that never connects cannot leave the port open forever (default 300).
+.IP \(bu 2
+.B admin_sequence
+Optional revoke knock for
+.BI permanent
+mode; when it completes the client's IP is removed and the port closes again.
+.RE
+.SH MODES
+.RS 4
+.IP \(bu 2
+.B fixed_ttl \- keep the port open for
+.BI duration
+seconds, then close.
+.IP \(bu 2
+.B close_on_connect \- close as soon as the client makes a connection, with
+.BI fallback_ttl
+as a safety net.
+.IP
+For TCP the first packet to a service port (the connection's SYN) closes the
+port. For UDP there is no handshake, so the first subsequent UDP packet to a
+service port closes it; the arming knock itself does not close the port the
+instant it opens.
+.IP \(bu 2
+.B permanent \- keep the port open with no timeout. Pair with
+.BI admin_sequence
+to revoke.
+.RE
+.SH EXAMPLES
+Open SSH (port 22) for 30 seconds after a knock:
+.IP
+.BR "sudo sourceknock /etc/sourceknock/sourceknock.conf" ""
+.PP
+Knock from a client by sending each probe with the right SOURCE port (7000,
+8000, 9000) toward the fixed service port — the destination port is
+irrelevant — then connect:
+.IP
+.nf
+# hping3 -D sets the SOURCE port; the knock lives there, not the dest port
+for p in 7000 8000 9000; do
+    hping3 -D $p --udp -i u1000 server </dev/null 2>/dev/null &
+done
+wait
+ssh -p 22 user@server
+.fi
+.PP
+Run under systemd (installs the binary and units, then reloads systemd):
+.IP
+.nf
+sudo make install
+sudo useradd --system --user-group --home-dir /var/lib/sourceknock \
+    --no-create-home sourceknock
+sudo systemctl enable --now sourceknock
+.fi
+.SH FILES
+.TP
+.BI /etc/sourceknock/sourceknock.conf
+Default configuration file.
+.TP
+.BI /usr/local/bin/sourceknock
+Installed daemon binary (see
+.BR make install ).
+.TP
+.BI /etc/systemd/system/sourceknock.service
+Default systemd unit.
+.TP
+.BI /etc/systemd/system/sourceknock@.service
+Per-instance systemd template unit.
+.SH DEBUGGING
+To inspect what the daemon has programmed, list the nftables set for a
+service. With a trigger named
+.BI ssh :
+.IP
+.BR "nft list set inet sourceknock_ssh allowed_v4" ""
+.PP
+Common problems (permissions, missing/old nftables, IPv6 quirks) are covered in
+the project's
+.B CONTRIBUTING.md
+and the Troubleshooting section of the README.
+.SH EXIT STATUS
+.RS 4
+.IP \(bu 2
+.B 0
+The daemon ran until signalled.
+.IP \(bu 2
+.B 1
+Configuration error, reward/state-machine setup failure, or capture open
+failure (usually missing privileges).
+.RE
+.SH SEE ALSO
+.BR systemctl (8),
+.BR nft (8),
+.BR hping3 (8)
+.PP
+Project documentation and contributor guide:
+.B https://github.com/Crank-Git/sourceknock#readme
+.SH AUTHOR
+Written and maintained by Crank-Git.
+Released under the MIT License.

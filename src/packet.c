@@ -1,11 +1,12 @@
 /* packet.c - link/layer4 parsing. */
 #include "packet.h"
 
+#include <arpa/inet.h>
 #include <string.h>
 
 /* ARPHRD_ values we care about. */
-#define ARPHRD_ETHER      1
-#define ARPHRD_LOOPBACK  79
+#define ARPHRD_ETHER 1
+#define ARPHRD_LOOPBACK 79
 
 /* EtherType / IPv6 next-header protocol numbers. */
 #define ETHERTYPE_IPV4 0x0800
@@ -46,18 +47,23 @@ static int ipv6_l4(const unsigned char *buf, size_t len, size_t ip_off,
 {
     if (ip_off + 40 > len)
         return 0;
-    int next = buf[ip_off + 6];          /* next header field */
-    size_t off = ip_off + 40;            /* L4 starts after the fixed header */
+    int next = buf[ip_off + 6]; /* next header field */
+    size_t off = ip_off + 40;   /* L4 starts after the fixed header */
     int hops = 0;
-    while (is_ext_header(next)) {
+    while (is_ext_header(next))
+    {
         if (++hops > 8)
-            return 0;                    /* pathological chain */
-        if (next == 44) {                /* fragment: fixed 8 bytes */
+            return 0; /* pathological chain */
+        if (next == 44)
+        { /* fragment: fixed 8 bytes. The Fragment header's Next Header
+             field is at offset 0 (RFC 8200), not after the header. */
             if (off + 8 > len)
                 return 0;
-            next = buf[off + 6];
+            next = buf[off];
             off += 8;
-        } else {                         /* options/routing: len byte at +1 */
+        }
+        else
+        { /* options/routing: len byte at +1 */
             if (off + 2 > len)
                 return 0;
             uint8_t extlen = buf[off + 1];
@@ -80,7 +86,7 @@ static int parse_ipv4(const unsigned char *buf, size_t len, size_t ip_off,
         return 0;
     uint8_t vihl = buf[ip_off];
     if ((vihl >> 4) != 4)
-        return 0;                       /* not IPv4 */
+        return 0; /* not IPv4 */
     uint8_t ihl = (vihl & 0x0f) * 4;
     if (ihl < 20 || ip_off + ihl > len)
         return 0;
@@ -89,22 +95,30 @@ static int parse_ipv4(const unsigned char *buf, size_t len, size_t ip_off,
     size_t l4len = len - (ip_off + ihl);
 
     struct in_addr src;
-    /* IPv4 source address is at offset 12 within the IP header. */
+    struct in_addr dst;
+    /* IPv4 source address is at offset 12, dest at offset 16 within the IP
+     * header. */
     if (!be32_ip(buf, len, ip_off + 12, &src))
+        return 0;
+    if (!be32_ip(buf, len, ip_off + 16, &dst))
         return 0;
 
     /* --- L4: source port (offset 0), dest port (offset 2) --- */
-    if (l4proto == IPPROTO_TCP && l4len >= 8) {
+    if (l4proto == IPPROTO_TCP && l4len >= 8)
+    {
         out->family = AF_INET;
         out->addr.v4 = src;
+        out->dst.v4 = dst;
         out->proto = PROTO_TCP;
         out->sport = be16(iph, l4len, 0);
         out->dport = be16(iph, l4len, 2);
         return 1;
     }
-    if (l4proto == IPPROTO_UDP && l4len >= 8) {
+    if (l4proto == IPPROTO_UDP && l4len >= 8)
+    {
         out->family = AF_INET;
         out->addr.v4 = src;
+        out->dst.v4 = dst;
         out->proto = PROTO_UDP;
         out->sport = be16(iph, l4len, 0);
         out->dport = be16(iph, l4len, 2);
@@ -121,21 +135,25 @@ static int parse_ipv6(const unsigned char *buf, size_t len, size_t ip_off,
     if (!ipv6_l4(buf, len, ip_off, &l4off, &nh))
         return 0;
     if (nh != IPPROTO_TCP && nh != IPPROTO_UDP)
-        return 0;                       /* encrypted/other L4: can't read ports */
+        return 0; /* encrypted/other L4: can't read ports */
 
     struct in6_addr src;
+    struct in6_addr dst;
     if (ip_off + 24 > len)
         return 0;
-    memcpy(&src, &buf[ip_off + 8], 16); /* IPv6 source is at offset 8 (16 B) */
+    memcpy(&src, &buf[ip_off + 8], 16);  /* IPv6 source is at offset 8 (16 B) */
+    memcpy(&dst, &buf[ip_off + 24], 16); /* IPv6 dest is at offset 24 (16 B) */
 
     const unsigned char *l4 = buf + l4off;
     size_t l4len = len - l4off;
     if (l4len < 8)
         return 0;
 
-    if (nh == IPPROTO_TCP) {
+    if (nh == IPPROTO_TCP)
+    {
         out->family = AF_INET6;
         out->addr.v6 = src;
+        out->dst.v6 = dst;
         out->proto = PROTO_TCP;
         out->sport = be16(l4, l4len, 0);
         out->dport = be16(l4, l4len, 2);
@@ -143,10 +161,47 @@ static int parse_ipv6(const unsigned char *buf, size_t len, size_t ip_off,
     }
     out->family = AF_INET6;
     out->addr.v6 = src;
+    out->dst.v6 = dst;
     out->proto = PROTO_UDP;
     out->sport = be16(l4, l4len, 0);
     out->dport = be16(l4, l4len, 2);
     return 1;
+}
+
+/* First wire byte of an in_addr given its network-order s_addr. */
+static unsigned int v4_first_byte(uint32_t s_addr)
+{
+    return (ntohl(s_addr) >> 24) & 0xff;
+}
+
+/* True if the address is multicast (IPv4 224.0.0.0/4, IPv6 ff00::/8) or the
+ * limited broadcast address (255.255.255.255). `a` points at the family's
+ * address union (addr.v4 or addr.v6). */
+static int addr_is_mcast_or_bcast(int family, const void *a)
+{
+    if (family == AF_INET)
+    {
+        unsigned int b = v4_first_byte(((const struct in_addr *)a)->s_addr);
+        if (b >= 224 && b <= 239)
+            return 1; /* multicast */
+        if (b == 255)
+            return 1; /* 255.255.255.255 limited broadcast */
+        return 0;
+    }
+    /* IPv6: first nibble of ff00::/8 is 0xff. */
+    const unsigned char *b6 = (const unsigned char *)a;
+    return b6[0] == 0xff;
+}
+
+int pkt_is_control(const pkt_info_t *p)
+{
+    if (!p)
+        return 0;
+    /* A knock is unicast-to-unicast; drop anything touching multicast/broadcast
+     * (mDNS/LLMNR/NDP/IGMP-adjacent) so control-plane noise can't reset a
+     * knock sequence. */
+    return addr_is_mcast_or_bcast(p->family, &p->addr) ||
+           addr_is_mcast_or_bcast(p->family, &p->dst);
 }
 
 int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
@@ -159,7 +214,8 @@ int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
     /* --- locate the L3 header depending on link layer --- */
     size_t ip_off;
 
-    if (link_type == ARPHRD_LOOPBACK) {
+    if (link_type == ARPHRD_LOOPBACK)
+    {
         /* Linux lo: 2-byte BE protocol, then the L3 packet. */
         uint16_t proto = be16(buf, len, 0);
         if (proto != ETHERTYPE_IPV4 && proto != ETHERTYPE_IPV6)
@@ -167,7 +223,9 @@ int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
         if (2 >= len)
             return 0;
         ip_off = 2;
-    } else {
+    }
+    else
+    {
         /* Ethernet II: ethertype at offset 12. */
         if (len < 14)
             return 0;
@@ -176,6 +234,13 @@ int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
             return 0;
         ip_off = 14;
     }
+
+    /* ip_off points just past the link header; a header-only frame (e.g. a
+     * 14-byte Ethernet frame with no L3 payload) makes buf[ip_off] OOB. Guard
+     * it. Found by the libFuzzer run on pkt_parse (ASan heap-buffer-overflow).
+     */
+    if (ip_off >= len)
+        return 0;
 
     if ((buf[ip_off] >> 4) == 4)
         return parse_ipv4(buf, len, ip_off, out);

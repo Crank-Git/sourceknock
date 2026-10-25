@@ -1,22 +1,21 @@
 /* config_test.c - unit tests for the config parser. */
 #include <string.h>
 
-#include "test.h"
 #include "config.h"
+#include "test.h"
 
-static const char *good_cfg =
-    "# a knockd-ish config\n"
-    "[global]\n"
-    "  interface = eth0\n"
-    "\n"
-    "[trigger:ssh]\n"
-    "  service = ssh\n"
-    "  port = 22\n"
-    "  protocol = tcp\n"
-    "  sequence = 7000, 8000, 9000\n"
-    "  window = 5\n"
-    "  mode = fixed_ttl\n"
-    "  duration = 30\n";
+static const char *good_cfg = "# a knockd-ish config\n"
+                              "[global]\n"
+                              "  interface = eth0\n"
+                              "\n"
+                              "[trigger:ssh]\n"
+                              "  service = ssh\n"
+                              "  port = 22\n"
+                              "  protocol = tcp\n"
+                              "  sequence = 7000, 8000, 9000\n"
+                              "  window = 5\n"
+                              "  mode = fixed_ttl\n"
+                              "  duration = 30\n";
 
 static void test_good(void)
 {
@@ -36,10 +35,10 @@ static void test_good(void)
     CHECK_EQ_INT(g_cfg.triggers[0].duration, 30);
 }
 
-static const char *udp_cfg =
-    "[global]\ninterface = lo\n"
-    "[trigger:t]\nport = 2222\nprotocol = udp\n"
-    "sequence = 1,2,3,4,5\nmode = close_on_connect\nwindow = 10\nduration = 30\n";
+static const char *udp_cfg = "[global]\ninterface = lo\n"
+                             "[trigger:t]\nport = 2222\nprotocol = udp\n"
+                             "sequence = 1,2,3,4,5\nmode = "
+                             "close_on_connect\nwindow = 10\nduration = 30\n";
 
 static void test_udp_close(void)
 {
@@ -72,18 +71,16 @@ static void test_missing_sequence(void)
 static void test_bad_protocol(void)
 {
     char err[256];
-    const char *c =
-        "[global]\ninterface = lo\n"
-        "[trigger:t]\nport = 22\nprotocol = sctp\nsequence = 1,2\n";
+    const char *c = "[global]\ninterface = lo\n"
+                    "[trigger:t]\nport = 22\nprotocol = sctp\nsequence = 1,2\n";
     CHECK(config_parse_string(c, err, sizeof(err)) == -1);
 }
 
 static void test_bad_port(void)
 {
     char err[256];
-    const char *c =
-        "[global]\ninterface = lo\n"
-        "[trigger:t]\nport = 0\nprotocol = tcp\nsequence = 1,2\n";
+    const char *c = "[global]\ninterface = lo\n"
+                    "[trigger:t]\nport = 0\nprotocol = tcp\nsequence = 1,2\n";
     CHECK(config_parse_string(c, err, sizeof(err)) == -1);
     const char *c2 =
         "[global]\ninterface = lo\n"
@@ -127,9 +124,9 @@ static void test_multi_trigger_missing_seq(void)
     const char *c =
         "[global]\ninterface = lo\n"
         "[trigger:a]\nport = 22\nprotocol = tcp\nsequence = 1,2\n"
-        "[trigger:b]\nport = 80\nprotocol = tcp\n";  /* no sequence */
+        "[trigger:b]\nport = 80\nprotocol = tcp\n"; /* no sequence */
     CHECK(config_parse_string(c, err, sizeof(err)) == -1);
-    CHECK_EQ_INT(g_cfg.n_triggers, 0);  /* nothing left valid on error */
+    CHECK_EQ_INT(g_cfg.n_triggers, 0); /* nothing left valid on error */
 }
 
 /* A single port still parses (backwards compatible). */
@@ -169,26 +166,26 @@ static void test_multi_port(void)
 static void test_bad_ports(void)
 {
     char err[256];
-    const char *c0 =
-        "[global]\ninterface = lo\n[trigger:t]\nport = 0\nprotocol = tcp\nsequence = 1,2\n";
+    const char *c0 = "[global]\ninterface = lo\n[trigger:t]\nport = "
+                     "0\nprotocol = tcp\nsequence = 1,2\n";
     CHECK(config_parse_string(c0, err, sizeof(err)) == -1);
-    const char *c1 =
-        "[global]\ninterface = lo\n[trigger:t]\nport = 70000\nprotocol = tcp\nsequence = 1,2\n";
+    const char *c1 = "[global]\ninterface = lo\n[trigger:t]\nport = "
+                     "70000\nprotocol = tcp\nsequence = 1,2\n";
     CHECK(config_parse_string(c1, err, sizeof(err)) == -1);
-    const char *c2 =
-        "[global]\ninterface = lo\n[trigger:t]\nport = abc\nprotocol = tcp\nsequence = 1,2\n";
+    const char *c2 = "[global]\ninterface = lo\n[trigger:t]\nport = "
+                     "abc\nprotocol = tcp\nsequence = 1,2\n";
     CHECK(config_parse_string(c2, err, sizeof(err)) == -1);
-    const char *c3 =
-        "[global]\ninterface = lo\n[trigger:t]\nport = 80-\nprotocol = tcp\nsequence = 1,2\n";
+    const char *c3 = "[global]\ninterface = lo\n[trigger:t]\nport = "
+                     "80-\nprotocol = tcp\nsequence = 1,2\n";
     CHECK(config_parse_string(c3, err, sizeof(err)) == -1);
-    const char *c4 =
-        "[global]\ninterface = lo\n[trigger:t]\nport = 80-70\nprotocol = tcp\nsequence = 1,2\n";
+    const char *c4 = "[global]\ninterface = lo\n[trigger:t]\nport = "
+                     "80-70\nprotocol = tcp\nsequence = 1,2\n";
     CHECK(config_parse_string(c4, err, sizeof(err)) == -1);
-    const char *c5 =
-        "[global]\ninterface = lo\n[trigger:t]\nport = 80-90-100\nprotocol = tcp\nsequence = 1,2\n";
+    const char *c5 = "[global]\ninterface = lo\n[trigger:t]\nport = "
+                     "80-90-100\nprotocol = tcp\nsequence = 1,2\n";
     CHECK(config_parse_string(c5, err, sizeof(err)) == -1);
-    const char *c6 =
-        "[global]\ninterface = lo\n[trigger:t]\nport =\nprotocol = tcp\nsequence = 1,2\n";
+    const char *c6 = "[global]\ninterface = lo\n[trigger:t]\nport =\nprotocol "
+                     "= tcp\nsequence = 1,2\n";
     CHECK(config_parse_string(c6, err, sizeof(err)) == -1);
 }
 

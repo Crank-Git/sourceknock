@@ -3,6 +3,10 @@
 #   make            build the daemon (Linux) + all tests
 #   make test       build and run the cross-platform unit tests (macOS/Linux)
 #   make daemon     build the sourceknock daemon (requires Linux headers)
+#   make fuzz       build + run the libFuzzer pkt_parse target (Linux, needs
+#                   clang with libFuzzer + AddressSanitizer)
+#   make install    install the daemon + systemd units + man page (Linux, needs root)
+#   make uninstall  remove them again
 #   make clean
 
 CC      ?= cc
@@ -38,9 +42,54 @@ DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
 TESTS := state_test packet_test config_test close_test
 
-.PHONY: all test daemon clean
+# ---- install (Linux only: ships the systemd units) ----
+# Paths are overridable, e.g. `make install PREFIX=/usr BINDIR=/usr/bin`.
+# DESTDIR supports packaging/rubber-stamping (no files touch the live tree).
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+SYSDIR  ?= /etc/systemd/system
+CONFDIR ?= /etc/sourceknock
+MANDIR  ?= $(PREFIX)/share/man
+UNIT_DIR := contrib/systemd
+# The units run as the unprivileged 'sourceknock' user (see README); that user
+# must exist before the service starts.
+
+# ---- fuzzing (Linux only: needs libFuzzer + ASan) ----
+FUZZ_DIR     := tests/fuzz
+FUZZ_SRC     := $(FUZZ_DIR)/fuzz_pkt_parse.cc
+FUZZ_BIN     := $(FUZZ_DIR)/fuzz_pkt_parse
+FUZZ_CORPUS  := $(FUZZ_DIR)/corpus/pkt_parse
+FUZZ_CXXFLAGS := -O2 -g -std=c++14 -fsanitize=fuzzer,address -Isrc
+# libFuzzer is a clang feature; gcc lacks the runtime.
+FUZZ_CC ?= clang
+
+.PHONY: all test daemon fuzz fuzz-build fuzz-seeds clean format check-format tidy install uninstall
 
 all: test
+
+# ---- code quality (clang-format + clang-tidy) ----
+# Requires a real clang-format / clang-tidy (apt install clang, or
+# `brew install clang-format` on macOS). The pip `clang-format` wrapper does
+# NOT support `--check`, so use a packaged binary for `make check-format`.
+FORMAT_FILES := $(wildcard src/*.c src/*.h tests/*.c tests/*.h tests/fuzz/*.c tests/fuzz/*.cc)
+# make_seeds.py generates the fuzz corpus; it is Python, not C, so it is
+# intentionally excluded from the clang-format check above.
+
+format:
+	clang-format -i $(FORMAT_FILES)
+
+check-format:
+	@ok=0; \
+	for f in $(FORMAT_FILES); do \
+		if ! clang-format "$$f" 2>/dev/null | diff -q "$$f" - >/dev/null 2>&1; then \
+			echo "NOT FORMATTED: $$f"; ok=1; \
+		fi; \
+	done; \
+	if [ $$ok -ne 0 ]; then echo "Run 'make format' to fix."; exit 1; fi; \
+	echo "All files clang-format clean"
+
+tidy:
+	clang-tidy $(DAEMON_SRC) -- -Isrc -std=gnu11
 
 # ---- unit tests (pure core, runs anywhere with a C compiler) ----
 test: $(TESTS)
@@ -62,13 +111,67 @@ config_test: tests/config_test.o src/config.o
 close_test: tests/close_test.o src/close.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 
+# ---- fuzzing (Linux only) ----
+# Compile the C++ target and the C parser separately (the C++ std flag is
+# invalid for the C file), then link with the libFuzzer runtime. Fails
+# (non-zero) if the fuzzer finds a crash.
+fuzz-build:
+	$(FUZZ_CC) -O2 -g -std=c++14 -fsanitize=fuzzer,address \
+		-c $(FUZZ_SRC) -Isrc -o $(FUZZ_DIR)/fuzz_pkt_parse.o
+	$(FUZZ_CC) -O2 -g -fsanitize=address \
+		-c src/packet.c -Isrc -o $(FUZZ_DIR)/packet.fuzz.o
+	$(FUZZ_CC) -fsanitize=fuzzer,address \
+		$(FUZZ_DIR)/fuzz_pkt_parse.o $(FUZZ_DIR)/packet.fuzz.o -o $(FUZZ_BIN)
+
+fuzz: fuzz-build
+	$(FUZZ_BIN) -max_total_time=60 -timeout=10 $(FUZZ_CORPUS)
+
+# Regenerate the seed corpus on any host (no libFuzzer needed).
+fuzz-seeds:
+	python3 $(FUZZ_DIR)/make_seeds.py
+
 # ---- the daemon (Linux only) ----
 daemon: sourceknock
 sourceknock: $(DAEMON_OBJ)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+# Generic object rule (keeps -Isrc so headers in src/ resolve).
 %.o: %.c
 	$(CC) $(CFLAGS) -Isrc -c $< -o $@
 
+# ---- install (Linux only: ships the systemd units) ----
+# Installs the daemon binary and the systemd units, then reloads systemd.
+# Requires root. The unit runs as the unprivileged 'sourceknock' user, which must
+# exist before the service is started (see the README). Enable with:
+#   systemctl enable --now sourceknock        # default config
+#   systemctl enable --now sourceknock@myconf # per-instance (template)
+install: daemon
+	install -d -m 0755 $(DESTDIR)$(BINDIR)
+	install -m 0755 sourceknock $(DESTDIR)$(BINDIR)/sourceknock
+	# The man page ships alongside the systemd units, so it is installed by the
+	# same Linux-only 'install' target (see the comment above).
+	install -d -m 0755 $(DESTDIR)$(MANDIR)/man1
+	install -m 0644 man/sourceknock.1 $(DESTDIR)$(MANDIR)/man1/
+	install -d -m 0755 $(DESTDIR)$(SYSDIR)
+	install -m 0644 $(UNIT_DIR)/sourceknock.service $(DESTDIR)$(SYSDIR)/
+	install -m 0644 $(UNIT_DIR)/sourceknock@.service $(DESTDIR)$(SYSDIR)/
+	install -d -m 0755 $(DESTDIR)$(CONFDIR)
+	@if command -v systemctl >/dev/null 2>&1; then \
+		systemctl daemon-reload; \
+	else \
+		echo "install: systemctl not found; enable manually:"; \
+		echo "          systemctl enable --now sourceknock"; \
+	fi
+
+uninstall:
+	@if command -v systemctl >/dev/null 2>&1; then \
+		systemctl disable --now sourceknock.service 2>/dev/null || true; \
+		systemctl disable --now sourceknock@.service 2>/dev/null || true; \
+		systemctl daemon-reload; \
+	fi
+	rm -f $(DESTDIR)$(SYSDIR)/sourceknock.service
+	rm -f $(DESTDIR)$(SYSDIR)/sourceknock@.service
+	rm -f $(DESTDIR)$(BINDIR)/sourceknock
+
 clean:
-	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock tests/*.o
+	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock tests/*.o $(FUZZ_BIN) $(FUZZ_DIR)/*.o

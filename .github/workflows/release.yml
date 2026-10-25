@@ -1,0 +1,40 @@
+name: release
+
+# Cut a release by pushing a v* tag. CI builds the Linux daemon and publishes
+# it as a GitHub Release artifact.
+#
+#   git tag -a v1.0.0 -m "sourceknock 1.0.0"
+#   git push origin v1.0.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Build daemon
+        run: make daemon
+
+      - name: Verify binary
+        run: |
+          file sourceknock
+          ls -la sourceknock
+
+      - name: Create Release & Upload Artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: sourceknock
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run unit tests (cross-platform core)
+        run: make test
+
+      # The daemon layer (AF_PACKET / nftables) is Linux-only, so only build
+      # it where the Linux kernel headers are available.
+      - name: Build daemon (Linux)
+        if: runner.os == 'Linux'
+        run: make daemon
+
+      - name: Verify daemon binary
+        if: runner.os == 'Linux'
+        run: |
+          file sourceknock
+          ls -la sourceknock
+
+      - name: Fuzz pkt_parse (libFuzzer + ASan)
+        # packet.c parses untrusted frames (variable-length headers, an IPv6
+        # extension-header chain) - classic OOB-read territory. Bounded run
+        # that fails on any crash. Linux-only: libFuzzer's runtime isn't on
+        # macOS runners.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+          make fuzz
+
+      # End-to-end integration test (issue #18): drives a full knock cycle
+      # inside a network namespace over a real capture interface + nftables.
+      # Linux + root only (nftables is not installed by default on the runner).
+      - name: Install nftables (Linux e2e)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y nftables
+          nft --version
+      - name: Run e2e integration test (fixed_ttl)
+        if: runner.os == 'Linux'
+        run: bash tests/e2e_integration.sh tests/e2e_fixed.conf
+      - name: Run e2e integration test (close_on_connect)
+        if: runner.os == 'Linux'
+        run: bash tests/e2e_integration.sh tests/e2e_close.conf
+
+  quality:
+    name: Format / lint / secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned clang-format
+        # Pinned via pip so the exact binary is reproducible across runners
+        # (apt's clang-format drifts between image versions).
+        run: |
+          python3 -m venv $HOME/clangtools
+          source $HOME/clangtools/bin/activate
+          pip install --quiet clang-format==17.0.6
+          deactivate
+
+      - name: Install clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+
+      - name: Check formatting
+        run: |
+          # Prepend the pinned venv so clang-format 17.0.6 wins over any
+          # system-installed version.
+          export PATH="$HOME/clangtools/bin:$PATH"
+          make check-format
+
+      # Non-blocking: surfaces warnings without failing the build until the
+      # codebase is clean.
+      - name: Run clang-tidy
+        continue-on-error: true
+        run: make tidy
+
+      - name: Install gitleaks (free OSS CLI)
+        # The gitleaks GitHub Action now requires a commercial license key,
+        # and the upstream install.sh was removed, so download the release
+        # binary directly instead.
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+          gitleaks version
+
+      - name: Scan for secrets
+        run: gitleaks detect --source . --exit-code=1 --report-format text

@@ -8,46 +8,56 @@
 #ifndef SOURCEKNOCK_PACKET_H
 #define SOURCEKNOCK_PACKET_H
 
+#include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <netinet/in.h>
 
 /* Link-layer ARPHRD_ types. Defined by <net/if_arp.h> on Linux; provide
  * portable fallbacks so the pure parser + tests build on non-Linux too. */
 #ifndef ARPHRD_ETHER
-#define ARPHRD_ETHER      1
+#define ARPHRD_ETHER 1
 #endif
 #ifndef ARPHRD_LOOPBACK
-#define ARPHRD_LOOPBACK  79
+#define ARPHRD_LOOPBACK 79
 #endif
 
-typedef enum {
-    PKT_NONE = 0,   /* not something we understand */
-    PKT_IPV4,       /* IPv4 we could parse */
-    PKT_IPV6,       /* IPv6 we could parse */
+typedef enum
+{
+    PKT_NONE = 0, /* not something we understand */
+    PKT_IPV4,     /* IPv4 we could parse */
+    PKT_IPV6,     /* IPv6 we could parse */
 } pkt_kind_t;
 
-typedef enum {
+typedef enum
+{
     PROTO_NONE = 0,
     PROTO_TCP,
     PROTO_UDP
 } proto_t;
 
-typedef struct {
-    int  family;   /* AF_INET or AF_INET6 */
-    union {
-        struct in_addr  v4;
+typedef struct
+{
+    int family; /* AF_INET or AF_INET6 */
+    union
+    {
+        struct in_addr v4;
         struct in6_addr v6;
-    } addr;
-    uint16_t sport;   /* host-byte-order source port */
-    uint16_t dport;   /* host-byte-order destination port (0 if n/a) */
+    } addr; /* source address */
+    union
+    {
+        struct in_addr v4;
+        struct in6_addr v6;
+    } dst;          /* destination address */
+    uint16_t sport; /* host-byte-order source port */
+    uint16_t dport; /* host-byte-order destination port (0 if n/a) */
     proto_t proto;
 } pkt_info_t;
 
 /* Length in bytes of the address stored for a given family. */
 static inline size_t pkt_addr_len(int family)
 {
-    return family == AF_INET6 ? sizeof(struct in6_addr) : sizeof(struct in_addr);
+    return family == AF_INET6 ? sizeof(struct in6_addr)
+                              : sizeof(struct in_addr);
 }
 
 /*
@@ -59,5 +69,11 @@ static inline size_t pkt_addr_len(int family)
  */
 int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
               pkt_info_t *out);
+
+/* True if the packet's source or destination is multicast/broadcast (i.e. a
+ * control-plane frame such as mDNS/LLMNR/NDP that must never count as a knock).
+ * IPv4 multicast is 224.0.0.0/4, limited broadcast is 255.255.255.255; IPv6
+ * multicast is ff00::/8. */
+int pkt_is_control(const pkt_info_t *p);
 
 #endif /* SOURCEKNOCK_PACKET_H */
