@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run unit tests (cross-platform core)
+        run: make test
+
+      # The daemon layer (AF_PACKET / nftables) is Linux-only, so only build
+      # it where the Linux kernel headers are available.
+      - name: Build daemon (Linux)
+        if: runner.os == 'Linux'
+        run: make daemon
+
+      - name: Verify daemon binary
+        if: runner.os == 'Linux'
+        run: |
+          file sourceknock
+          ls -la sourceknock
