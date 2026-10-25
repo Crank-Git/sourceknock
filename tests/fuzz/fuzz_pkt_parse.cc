@@ -10,7 +10,11 @@
  * The first input byte selects the link-layer type (ARPHRD_LOOPBACK vs
  * ARPHRD_ETHER) so both code paths are exercised; the rest is the raw frame.
  */
+/* packet.h is C; wrap it so the C++ translation unit gets C linkage / no
+ * name mangling for the pkt_* declarations it pulls in. */
+extern "C" {
 #include "packet.h"
+}
 
 #include <stddef.h>
 #include <stdint.h>
