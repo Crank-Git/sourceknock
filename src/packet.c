@@ -188,6 +188,13 @@ int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
         ip_off = 14;
     }
 
+    /* ip_off points just past the link header; a header-only frame (e.g. a
+     * 14-byte Ethernet frame with no L3 payload) makes buf[ip_off] OOB. Guard
+     * it. Found by the libFuzzer run on pkt_parse (ASan heap-buffer-overflow).
+     */
+    if (ip_off >= len)
+        return 0;
+
     if ((buf[ip_off] >> 4) == 4)
         return parse_ipv4(buf, len, ip_off, out);
     if ((buf[ip_off] >> 4) == 6)

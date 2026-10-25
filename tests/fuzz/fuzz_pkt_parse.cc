@@ -12,7 +12,8 @@
  */
 /* packet.h is C; wrap it so the C++ translation unit gets C linkage / no
  * name mangling for the pkt_* declarations it pulls in. */
-extern "C" {
+extern "C"
+{
 #include "packet.h"
 }
 

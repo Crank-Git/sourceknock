@@ -102,6 +102,10 @@ def main():
     write("too_short.eth", ETH, b"\x00\x11")                       # < 14 bytes
     write("bad_ethertype.eth", ETH, b"\x00" * 14 + b"\x00\x00")    # non-IP ethertype
     write("truncated_ipv4.eth", ETH, eth_header(0x0800) + b"\x45\x00\x00")  # IP header cut off
+    # Header-only Ethernet frame: exactly 14 bytes (dst+src+ethertype 0x0800),
+    # no L3 payload. ip_off == len, so buf[ip_off] would read 1 byte past the
+    # end. Must parse to 0 (regression for an ASan heap-buffer-overflow).
+    write("header_only_ipv4.eth", ETH, eth_header(0x0800))
     write("all_zero.eth", ETH, b"\x00" * 8)                        # garbage
     write("one_byte.eth", ETH, b"\x01")                            # single byte
 
