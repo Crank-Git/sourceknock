@@ -5,7 +5,7 @@
 #   make daemon     build the sourceknock daemon (requires Linux headers)
 #   make fuzz       build + run the libFuzzer pkt_parse target (Linux, needs
 #                   clang with libFuzzer + AddressSanitizer)
-#   make install    install the daemon + systemd units (Linux, needs root)
+#   make install    install the daemon + systemd units + man page (Linux, needs root)
 #   make uninstall  remove them again
 #   make clean
 
@@ -49,6 +49,7 @@ PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 SYSDIR  ?= /etc/systemd/system
 CONFDIR ?= /etc/sourceknock
+MANDIR  ?= $(PREFIX)/share/man
 UNIT_DIR := contrib/systemd
 # The units run as the unprivileged 'sourceknock' user (see README); that user
 # must exist before the service starts.
@@ -147,6 +148,10 @@ sourceknock: $(DAEMON_OBJ)
 install: daemon
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
 	install -m 0755 sourceknock $(DESTDIR)$(BINDIR)/sourceknock
+	# The man page ships alongside the systemd units, so it is installed by the
+	# same Linux-only 'install' target (see the comment above).
+	install -d -m 0755 $(DESTDIR)$(MANDIR)/man1
+	install -m 0644 man/sourceknock.1 $(DESTDIR)$(MANDIR)/man1/
 	install -d -m 0755 $(DESTDIR)$(SYSDIR)
 	install -m 0644 $(UNIT_DIR)/sourceknock.service $(DESTDIR)$(SYSDIR)/
 	install -m 0644 $(UNIT_DIR)/sourceknock@.service $(DESTDIR)$(SYSDIR)/
