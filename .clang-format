@@ -1,5 +1,7 @@
 ---
-Language:        C
+# Note: we deliberately do NOT set `Language:`. Auto-detecting by file
+# extension keeps the config working across clang-format versions (the
+# `Language: C` scalar was only added in clang-format 23).
 BasedOnStyle:  LLVM
 IndentWidth:   4
 TabWidth:      4

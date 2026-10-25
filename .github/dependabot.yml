@@ -1,0 +1,13 @@
+# Keep GitHub Actions dependencies up to date.
+# https://docs.github.com/en/actions/using-workflows/configuring-dependency-automation-for-pull-requests-and-issues
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "ci"
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
