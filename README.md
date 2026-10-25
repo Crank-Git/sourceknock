@@ -149,3 +149,7 @@ are not decoded.
 - De-duplication drops near-identical frames within a 0.5s window, which
   handles loopback/interfaces that deliver each frame twice.
 - Source ports are spoofable — this is obfuscation, not authentication.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Crank-Git.
