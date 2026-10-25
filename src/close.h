@@ -7,10 +7,10 @@
 #ifndef SOURCEKNOCK_CLOSE_H
 #define SOURCEKNOCK_CLOSE_H
 
-#include <stddef.h>
-#include <stdint.h>
 #include "config.h"
 #include "state.h"
+#include <stddef.h>
+#include <stdint.h>
 
 /* Is `port` one of the trigger's service ports? */
 int port_in_list(const trigger_t *tr, uint16_t port);
@@ -23,7 +23,6 @@ int port_in_list(const trigger_t *tr, uint16_t port);
  * the packet is NOT the arming knock itself. The arming knock must never
  * close the port the instant it opens — for UDP there is no handshake, so the
  * first *subsequent* packet to the service port is what ends access. */
-int should_close(const trigger_t *tr, int armed, uint16_t dport,
-                 kn_result_t r);
+int should_close(const trigger_t *tr, int armed, uint16_t dport, kn_result_t r);
 
 #endif /* SOURCEKNOCK_CLOSE_H */

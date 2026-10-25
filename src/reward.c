@@ -2,19 +2,20 @@
 #include "reward.h"
 
 #define _POSIX_C_SOURCE 200809L
+#include <arpa/inet.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
 #include <sys/wait.h>
-#include <arpa/inet.h>
+#include <unistd.h>
 
 /* Run `nft <args...>`. Returns child exit status, -1 on exec failure. */
 static int run_nft(char **args)
 {
     pid_t pid = fork();
-    if (pid == 0) {
+    if (pid == 0)
+    {
         /* The daemon runs as root; don't let a hostile PATH redirect the
          * nft binary. Pin a sane PATH in the child before exec. */
         setenv("PATH", "/usr/sbin:/sbin:/usr/bin:/bin", 1);
@@ -41,7 +42,8 @@ static int run_nft_str(const char *cmd)
     work[sizeof(work) - 1] = '\0';
 
     char *tok = strtok(work, " \t\n");
-    while (tok && n < 63) {
+    while (tok && n < 63)
+    {
         argv[n++] = tok;
         tok = strtok(NULL, " \t\n");
     }
@@ -102,9 +104,10 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
     run_nft_str(cmd);
 
     /* Base chain, policy accept so other traffic is unaffected. */
-    snprintf(cmd, sizeof(cmd),
-             "add chain %s %s { type filter hook input priority 0; policy accept; }",
-             r->table, r->chain);
+    snprintf(
+        cmd, sizeof(cmd),
+        "add chain %s %s { type filter hook input priority 0; policy accept; }",
+        r->table, r->chain);
     run_nft_str(cmd);
 
     /* Clear any prior rules (idempotent re-init). */
@@ -114,20 +117,20 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
     /* One accept (per family) + one drop rule per service port. The drop rule
      * matches both families in an inet table. Adding an IP to the allowed set
      * opens every port, since each accept rule references that set. */
-    for (size_t i = 0; i < n_ports; i++) {
+    for (size_t i = 0; i < n_ports; i++)
+    {
         uint16_t port = ports[i];
         snprintf(cmd, sizeof(cmd),
-                 "add rule %s %s ip saddr @%s %s dport %d accept",
-                 r->table, r->chain, r->set_v4, proto_str(proto), port);
+                 "add rule %s %s ip saddr @%s %s dport %d accept", r->table,
+                 r->chain, r->set_v4, proto_str(proto), port);
         run_nft_str(cmd);
         snprintf(cmd, sizeof(cmd),
-                 "add rule %s %s ip6 saddr @%s %s dport %d accept",
-                 r->table, r->chain, r->set_v6, proto_str(proto), port);
+                 "add rule %s %s ip6 saddr @%s %s dport %d accept", r->table,
+                 r->chain, r->set_v6, proto_str(proto), port);
         run_nft_str(cmd);
 
-        snprintf(cmd, sizeof(cmd),
-                 "add rule %s %s %s dport %d drop",
-                 r->table, r->chain, proto_str(proto), port);
+        snprintf(cmd, sizeof(cmd), "add rule %s %s %s dport %d drop", r->table,
+                 r->chain, proto_str(proto), port);
         run_nft_str(cmd);
     }
 
@@ -145,9 +148,11 @@ static const char *set_for_family(reward_t *r, int family)
 
 int reward_open(reward_t *r, int family, const void *ip, double timeout)
 {
-    if (!r->initialized) return -1;
+    if (!r->initialized)
+        return -1;
     const char *set = set_for_family(r, family);
-    if (!set) return -1;
+    if (!set)
+        return -1;
     char ipstr[48];
     int af = family == AF_INET6 ? AF_INET6 : AF_INET;
     if (inet_ntop(af, ip, ipstr, sizeof(ipstr)) == NULL)
@@ -155,47 +160,48 @@ int reward_open(reward_t *r, int family, const void *ip, double timeout)
 
     char cmd[512];
     char to[32];
-    if (timeout > 0) {
+    if (timeout > 0)
+    {
         fmt_timeout(to, sizeof(to), timeout);
-        snprintf(cmd, sizeof(cmd),
-                 "add element %s %s { %s timeout %s }",
+        snprintf(cmd, sizeof(cmd), "add element %s %s { %s timeout %s }",
                  r->table, set, ipstr, to);
-    } else {
-        snprintf(cmd, sizeof(cmd),
-                 "add element %s %s { %s }",
-                 r->table, set, ipstr);
+    }
+    else
+    {
+        snprintf(cmd, sizeof(cmd), "add element %s %s { %s }", r->table, set,
+                 ipstr);
     }
     return run_nft_str(cmd);
 }
 
 int reward_close(reward_t *r, int family, const void *ip)
 {
-    if (!r->initialized) return -1;
+    if (!r->initialized)
+        return -1;
     const char *set = set_for_family(r, family);
-    if (!set) return -1;
+    if (!set)
+        return -1;
     int af = family == AF_INET6 ? AF_INET6 : AF_INET;
     char ipstr[48];
     if (inet_ntop(af, ip, ipstr, sizeof(ipstr)) == NULL)
         return -1;
 
     char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "delete element %s %s { %s }",
-             r->table, set, ipstr);
+    snprintf(cmd, sizeof(cmd), "delete element %s %s { %s }", r->table, set,
+             ipstr);
     return run_nft_str(cmd);
 }
 
 int reward_flush(reward_t *r)
 {
-    if (!r->initialized) return -1;
+    if (!r->initialized)
+        return -1;
     char cmd[512];
     /* Remove every element from both family sets. */
-    snprintf(cmd, sizeof(cmd),
-             "delete element %s %s { * }",
-             r->table, r->set_v4);
+    snprintf(cmd, sizeof(cmd), "delete element %s %s { * }", r->table,
+             r->set_v4);
     run_nft_str(cmd);
-    snprintf(cmd, sizeof(cmd),
-             "delete element %s %s { * }",
-             r->table, r->set_v6);
+    snprintf(cmd, sizeof(cmd), "delete element %s %s { * }", r->table,
+             r->set_v6);
     return run_nft_str(cmd);
 }

@@ -2,9 +2,9 @@
 #include "state.h"
 #include "packet.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
 
 /* Compare two addresses of the same family. Returns 0 if equal. */
 static int addr_eq(int family, const void *a, const void *b)
@@ -14,9 +14,10 @@ static int addr_eq(int family, const void *a, const void *b)
 
 static kn_client_t *find_client(kn_ctx_t *ctx, int family, const void *ip)
 {
-    for (size_t i = 0; i < ctx->n_clients; i++) {
-        if (ctx->clients[i].family == family && addr_eq(family,
-                &ctx->clients[i].addr, ip))
+    for (size_t i = 0; i < ctx->n_clients; i++)
+    {
+        if (ctx->clients[i].family == family &&
+            addr_eq(family, &ctx->clients[i].addr, ip))
             return &ctx->clients[i];
     }
     return NULL;
@@ -28,12 +29,14 @@ static int ensure_client(kn_ctx_t *ctx, int family, const void *ip,
 {
     /* Reuse existing? */
     kn_client_t *c = find_client(ctx, family, ip);
-    if (c) {
+    if (c)
+    {
         *out = c;
         return 0;
     }
 
-    if (ctx->n_clients == ctx->cap_clients) {
+    if (ctx->n_clients == ctx->cap_clients)
+    {
         size_t newcap = ctx->cap_clients ? ctx->cap_clients * 2 : 16;
         kn_client_t *nc = realloc(ctx->clients, newcap * sizeof(*nc));
         if (!nc)
@@ -52,7 +55,8 @@ static int ensure_client(kn_ctx_t *ctx, int family, const void *ip,
 
 kn_ctx_t *kn_create(const knock_sequence_t *seq, double window)
 {
-    if (!seq || !seq->ports || seq->len == 0) {
+    if (!seq || !seq->ports || seq->len == 0)
+    {
         fprintf(stderr, "sourceknock: sequence must be non-empty\n");
         return NULL;
     }
@@ -62,7 +66,8 @@ kn_ctx_t *kn_create(const knock_sequence_t *seq, double window)
         return NULL;
 
     ctx->seq.ports = malloc(seq->len * sizeof(uint16_t));
-    if (!ctx->seq.ports) {
+    if (!ctx->seq.ports)
+    {
         free(ctx);
         return NULL;
     }
@@ -103,21 +108,24 @@ static void client_reset(kn_client_t *c)
     c->start_time = 0.0;
 }
 
-kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip,
-                    uint16_t sport, double now)
+kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip, uint16_t sport,
+                    double now)
 {
     kn_client_t *c;
     if (ensure_client(ctx, family, ip, &c) != 0)
         return -1;
 
     /* Timed out? If progress started but the window elapsed, wipe it. */
-    if (c->state != KNOCK_IDLE && (now - c->start_time) > ctx->window) {
+    if (c->state != KNOCK_IDLE && (now - c->start_time) > ctx->window)
+    {
         client_reset(c);
     }
 
-    if (c->state == KNOCK_IDLE) {
+    if (c->state == KNOCK_IDLE)
+    {
         /* Waiting for the first knock to match seq[0]. */
-        if (sport == ctx->seq.ports[0]) {
+        if (sport == ctx->seq.ports[0])
+        {
             c->index = 1;
             c->state = KNOCK_KNOCKING;
             c->start_time = now;
@@ -127,13 +135,15 @@ kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip,
     }
 
     /* Currently knocking: strict ordering, no tolerance. */
-    if (sport != ctx->seq.ports[c->index]) {
+    if (sport != ctx->seq.ports[c->index])
+    {
         client_reset(c);
         return KNOCK_RESET;
     }
 
     c->index++;
-    if (c->index >= ctx->seq.len) {
+    if (c->index >= ctx->seq.len)
+    {
         c->state = KNOCK_COMPLETE;
         if (ctx->on_complete)
             ctx->on_complete(ctx, family, ip, ctx->complete_arg);

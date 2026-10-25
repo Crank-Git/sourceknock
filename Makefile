@@ -38,9 +38,31 @@ DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
 TESTS := state_test packet_test config_test close_test
 
-.PHONY: all test daemon clean
+.PHONY: all test daemon clean format check-format tidy
 
 all: test
+
+# ---- code quality (clang-format + clang-tidy) ----
+# Requires a real clang-format / clang-tidy (apt install clang, or
+# `brew install clang-format` on macOS). The pip `clang-format` wrapper does
+# NOT support `--check`, so use a packaged binary for `make check-format`.
+FORMAT_FILES := $(wildcard src/*.c src/*.h tests/*.c tests/*.h)
+
+format:
+	clang-format -i $(FORMAT_FILES)
+
+check-format:
+	@ok=0; \
+	for f in $(FORMAT_FILES); do \
+		if ! clang-format "$$f" 2>/dev/null | diff -q "$$f" - >/dev/null 2>&1; then \
+			echo "NOT FORMATTED: $$f"; ok=1; \
+		fi; \
+	done; \
+	if [ $$ok -ne 0 ]; then echo "Run 'make format' to fix."; exit 1; fi; \
+	echo "All files clang-format clean"
+
+tidy:
+	clang-tidy $(DAEMON_SRC) -- -Isrc -std=gnu11
 
 # ---- unit tests (pure core, runs anywhere with a C compiler) ----
 test: $(TESTS)

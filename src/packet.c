@@ -4,8 +4,8 @@
 #include <string.h>
 
 /* ARPHRD_ values we care about. */
-#define ARPHRD_ETHER      1
-#define ARPHRD_LOOPBACK  79
+#define ARPHRD_ETHER 1
+#define ARPHRD_LOOPBACK 79
 
 /* EtherType / IPv6 next-header protocol numbers. */
 #define ETHERTYPE_IPV4 0x0800
@@ -46,18 +46,22 @@ static int ipv6_l4(const unsigned char *buf, size_t len, size_t ip_off,
 {
     if (ip_off + 40 > len)
         return 0;
-    int next = buf[ip_off + 6];          /* next header field */
-    size_t off = ip_off + 40;            /* L4 starts after the fixed header */
+    int next = buf[ip_off + 6]; /* next header field */
+    size_t off = ip_off + 40;   /* L4 starts after the fixed header */
     int hops = 0;
-    while (is_ext_header(next)) {
+    while (is_ext_header(next))
+    {
         if (++hops > 8)
-            return 0;                    /* pathological chain */
-        if (next == 44) {                /* fragment: fixed 8 bytes */
+            return 0; /* pathological chain */
+        if (next == 44)
+        { /* fragment: fixed 8 bytes */
             if (off + 8 > len)
                 return 0;
             next = buf[off + 6];
             off += 8;
-        } else {                         /* options/routing: len byte at +1 */
+        }
+        else
+        { /* options/routing: len byte at +1 */
             if (off + 2 > len)
                 return 0;
             uint8_t extlen = buf[off + 1];
@@ -80,7 +84,7 @@ static int parse_ipv4(const unsigned char *buf, size_t len, size_t ip_off,
         return 0;
     uint8_t vihl = buf[ip_off];
     if ((vihl >> 4) != 4)
-        return 0;                       /* not IPv4 */
+        return 0; /* not IPv4 */
     uint8_t ihl = (vihl & 0x0f) * 4;
     if (ihl < 20 || ip_off + ihl > len)
         return 0;
@@ -94,7 +98,8 @@ static int parse_ipv4(const unsigned char *buf, size_t len, size_t ip_off,
         return 0;
 
     /* --- L4: source port (offset 0), dest port (offset 2) --- */
-    if (l4proto == IPPROTO_TCP && l4len >= 8) {
+    if (l4proto == IPPROTO_TCP && l4len >= 8)
+    {
         out->family = AF_INET;
         out->addr.v4 = src;
         out->proto = PROTO_TCP;
@@ -102,7 +107,8 @@ static int parse_ipv4(const unsigned char *buf, size_t len, size_t ip_off,
         out->dport = be16(iph, l4len, 2);
         return 1;
     }
-    if (l4proto == IPPROTO_UDP && l4len >= 8) {
+    if (l4proto == IPPROTO_UDP && l4len >= 8)
+    {
         out->family = AF_INET;
         out->addr.v4 = src;
         out->proto = PROTO_UDP;
@@ -121,7 +127,7 @@ static int parse_ipv6(const unsigned char *buf, size_t len, size_t ip_off,
     if (!ipv6_l4(buf, len, ip_off, &l4off, &nh))
         return 0;
     if (nh != IPPROTO_TCP && nh != IPPROTO_UDP)
-        return 0;                       /* encrypted/other L4: can't read ports */
+        return 0; /* encrypted/other L4: can't read ports */
 
     struct in6_addr src;
     if (ip_off + 24 > len)
@@ -133,7 +139,8 @@ static int parse_ipv6(const unsigned char *buf, size_t len, size_t ip_off,
     if (l4len < 8)
         return 0;
 
-    if (nh == IPPROTO_TCP) {
+    if (nh == IPPROTO_TCP)
+    {
         out->family = AF_INET6;
         out->addr.v6 = src;
         out->proto = PROTO_TCP;
@@ -159,7 +166,8 @@ int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
     /* --- locate the L3 header depending on link layer --- */
     size_t ip_off;
 
-    if (link_type == ARPHRD_LOOPBACK) {
+    if (link_type == ARPHRD_LOOPBACK)
+    {
         /* Linux lo: 2-byte BE protocol, then the L3 packet. */
         uint16_t proto = be16(buf, len, 0);
         if (proto != ETHERTYPE_IPV4 && proto != ETHERTYPE_IPV6)
@@ -167,7 +175,9 @@ int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
         if (2 >= len)
             return 0;
         ip_off = 2;
-    } else {
+    }
+    else
+    {
         /* Ethernet II: ethertype at offset 12. */
         if (len < 14)
             return 0;
