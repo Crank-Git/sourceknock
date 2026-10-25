@@ -54,10 +54,11 @@ static int ipv6_l4(const unsigned char *buf, size_t len, size_t ip_off,
         if (++hops > 8)
             return 0; /* pathological chain */
         if (next == 44)
-        { /* fragment: fixed 8 bytes */
+        { /* fragment: fixed 8 bytes. The Fragment header's Next Header
+             field is at offset 0 (RFC 8200), not after the header. */
             if (off + 8 > len)
                 return 0;
-            next = buf[off + 6];
+            next = buf[off];
             off += 8;
         }
         else

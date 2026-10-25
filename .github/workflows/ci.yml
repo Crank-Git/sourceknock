@@ -35,6 +35,17 @@ jobs:
           file sourceknock
           ls -la sourceknock
 
+      - name: Fuzz pkt_parse (libFuzzer + ASan)
+        # packet.c parses untrusted frames (variable-length headers, an IPv6
+        # extension-header chain) - classic OOB-read territory. Bounded run
+        # that fails on any crash. Linux-only: libFuzzer's runtime isn't on
+        # macOS runners.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+          make fuzz
+
   quality:
     name: Format / lint / secrets
     runs-on: ubuntu-latest
