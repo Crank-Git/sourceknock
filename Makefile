@@ -3,6 +3,8 @@
 #   make            build the daemon (Linux) + all tests
 #   make test       build and run the cross-platform unit tests (macOS/Linux)
 #   make daemon     build the sourceknock daemon (requires Linux headers)
+#   make fuzz       build + run the libFuzzer pkt_parse target (Linux, needs
+#                   clang with libFuzzer + AddressSanitizer)
 #   make clean
 
 CC      ?= cc
@@ -38,7 +40,16 @@ DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
 TESTS := state_test packet_test config_test close_test
 
-.PHONY: all test daemon clean format check-format tidy
+# ---- fuzzing (Linux only: needs libFuzzer + ASan) ----
+FUZZ_DIR     := tests/fuzz
+FUZZ_SRC     := $(FUZZ_DIR)/fuzz_pkt_parse.cc
+FUZZ_BIN     := $(FUZZ_DIR)/fuzz_pkt_parse
+FUZZ_CORPUS  := $(FUZZ_DIR)/corpus/pkt_parse
+FUZZ_CXXFLAGS := -O2 -g -std=c++14 -fsanitize=fuzzer,address -Isrc
+# libFuzzer is a clang feature; gcc lacks the runtime.
+FUZZ_CC ?= clang
+
+.PHONY: all test daemon fuzz fuzz-build fuzz-seeds clean format check-format tidy
 
 all: test
 
@@ -46,7 +57,9 @@ all: test
 # Requires a real clang-format / clang-tidy (apt install clang, or
 # `brew install clang-format` on macOS). The pip `clang-format` wrapper does
 # NOT support `--check`, so use a packaged binary for `make check-format`.
-FORMAT_FILES := $(wildcard src/*.c src/*.h tests/*.c tests/*.h)
+FORMAT_FILES := $(wildcard src/*.c src/*.h tests/*.c tests/*.h tests/fuzz/*.c tests/fuzz/*.cc)
+# make_seeds.py generates the fuzz corpus; it is Python, not C, so it is
+# intentionally excluded from the clang-format check above.
 
 format:
 	clang-format -i $(FORMAT_FILES)
@@ -84,6 +97,25 @@ config_test: tests/config_test.o src/config.o
 close_test: tests/close_test.o src/close.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 
+# ---- fuzzing (Linux only) ----
+# Compile the C++ target and the C parser separately (the C++ std flag is
+# invalid for the C file), then link with the libFuzzer runtime. Fails
+# (non-zero) if the fuzzer finds a crash.
+fuzz-build:
+	$(FUZZ_CC) -O2 -g -std=c++14 -fsanitize=fuzzer,address \
+		-c $(FUZZ_SRC) -Isrc -o $(FUZZ_DIR)/fuzz_pkt_parse.o
+	$(FUZZ_CC) -O2 -g -fsanitize=address \
+		-c src/packet.c -Isrc -o $(FUZZ_DIR)/packet.fuzz.o
+	$(FUZZ_CC) -fsanitize=fuzzer,address \
+		$(FUZZ_DIR)/fuzz_pkt_parse.o $(FUZZ_DIR)/packet.fuzz.o -o $(FUZZ_BIN)
+
+fuzz: fuzz-build
+	$(FUZZ_BIN) -max_total_time=60 -timeout=10 $(FUZZ_CORPUS)
+
+# Regenerate the seed corpus on any host (no libFuzzer needed).
+fuzz-seeds:
+	python3 $(FUZZ_DIR)/make_seeds.py
+
 # ---- the daemon (Linux only) ----
 daemon: sourceknock
 sourceknock: $(DAEMON_OBJ)
@@ -93,4 +125,4 @@ sourceknock: $(DAEMON_OBJ)
 	$(CC) $(CFLAGS) -Isrc -c $< -o $@
 
 clean:
-	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock tests/*.o
+	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock tests/*.o $(FUZZ_BIN) $(FUZZ_DIR)/*.o
