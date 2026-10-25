@@ -46,6 +46,21 @@ jobs:
           sudo apt-get install -y clang
           make fuzz
 
+      # End-to-end integration test (issue #18): drives a full knock cycle
+      # inside a network namespace over a real capture interface + nftables.
+      # Linux + root only (nftables is not installed by default on the runner).
+      - name: Install nftables (Linux e2e)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nft
+      - name: Run e2e integration test (fixed_ttl)
+        if: runner.os == 'Linux'
+        run: bash tests/e2e_integration.sh tests/e2e_fixed.conf
+      - name: Run e2e integration test (close_on_connect)
+        if: runner.os == 'Linux'
+        run: bash tests/e2e_integration.sh tests/e2e_close.conf
+
   quality:
     name: Format / lint / secrets
     runs-on: ubuntu-latest
