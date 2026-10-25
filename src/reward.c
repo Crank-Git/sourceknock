@@ -36,7 +36,12 @@ static int run_nft_str(const char *cmd)
 {
     char work[512];
     char *argv[64];
-    int n = 0;
+    /* argv[0] is the program name execvp() runs; it must be "nft", not the
+     * command verb. Passing the verb ("delete", "add", ...) as argv[0] makes
+     * nft see no verb and default to ADD, so reward_close() re-added the very
+     * element it was deleting. Tokens start at argv[1]. */
+    argv[0] = "nft";
+    int n = 1;
 
     strncpy(work, cmd, sizeof(work) - 1);
     work[sizeof(work) - 1] = '\0';
@@ -47,7 +52,7 @@ static int run_nft_str(const char *cmd)
         argv[n++] = tok;
         tok = strtok(NULL, " \t\n");
     }
-    if (n == 0)
+    if (n == 1) /* program name only, no verb given */
         return -1;
     argv[n] = NULL;
 
