@@ -14,6 +14,7 @@
 #include "config.h"
 #include "reward.h"
 #include "state.h"
+#include "packet.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -243,6 +244,12 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
 {
     daemon_t *d = arg;
     char s[48];
+
+    /* Ignore multicast/broadcast (control-plane) frames: they can't be a
+     * knock and would otherwise corrupt the per-client sequence state. */
+    if (pkt_is_control(pkt))
+        return;
+
     ipstr(pkt->family, &pkt->addr, s, sizeof(s));
 
     for (size_t i = 0; i < d->n_triggers; i++)
