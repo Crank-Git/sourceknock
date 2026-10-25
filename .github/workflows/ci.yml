@@ -52,8 +52,10 @@ jobs:
       - name: Install nftables (Linux e2e)
         if: runner.os == 'Linux'
         run: |
+          sudo add-apt-repository -y universe
           sudo apt-get update
           sudo apt-get install -y nft
+          nft --version
       - name: Run e2e integration test (fixed_ttl)
         if: runner.os == 'Linux'
         run: bash tests/e2e_integration.sh tests/e2e_fixed.conf
