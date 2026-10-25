@@ -1,0 +1,29 @@
+[Unit]
+Description=sourceknock port-knocking daemon (instance %i)
+Documentation=https://github.com/Crank-Git/sourceknock#readme
+# Per-instance config lives at /etc/sourceknock/<instance>.conf, so
+# `systemctl start sourceknock@myconf` runs /etc/sourceknock/myconf.conf.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sourceknock
+Group=sourceknock
+ExecStart=/usr/local/bin/sourceknock /etc/sourceknock/%i.conf
+
+# AF_PACKET raw sockets need CAP_NET_RAW; running nft rules needs CAP_NET_ADMIN.
+Capabilities=CAP_NET_RAW+eip CAP_NET_ADMIN+eip
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+ProtectHome=yes
+ProtectSystem=full
+StandardOutput=journal
+StandardError=journal
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

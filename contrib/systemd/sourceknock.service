@@ -1,0 +1,35 @@
+[Unit]
+Description=sourceknock port-knocking daemon
+Documentation=https://github.com/Crank-Git/sourceknock#readme
+# The daemon captures on a network interface and programs nftables, so it must
+# start after the network is up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as an unprivileged user; the daemon only needs raw-socket + nftables
+# capabilities, which are granted explicitly below rather than running as root.
+User=sourceknock
+Group=sourceknock
+ExecStart=/usr/local/bin/sourceknock /etc/sourceknock/sourceknock.conf
+
+# AF_PACKET raw sockets need CAP_NET_RAW; running nft rules needs CAP_NET_ADMIN.
+# Grant exactly those and nothing else, and keep them across the lifetime.
+Capabilities=CAP_NET_RAW+eip CAP_NET_ADMIN+eip
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# Minimal hardening. The daemon logs to stderr (captured by journald) and does
+# not write to the filesystem, so the rest of the tree can be read-only.
+ProtectHome=yes
+ProtectSystem=full
+StandardOutput=journal
+StandardError=journal
+
+# Supervise: restart on an unexpected exit, back off slightly between tries.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
