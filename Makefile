@@ -134,6 +134,10 @@ daemon: sourceknock
 sourceknock: $(DAEMON_OBJ)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+# Generic object rule (keeps -Isrc so headers in src/ resolve).
+%.o: %.c
+	$(CC) $(CFLAGS) -Isrc -c $< -o $@
+
 # ---- install (Linux only: ships the systemd units) ----
 # Installs the daemon binary and the systemd units, then reloads systemd.
 # Requires root. The unit runs as the unprivileged 'sourceknock' user, which must
