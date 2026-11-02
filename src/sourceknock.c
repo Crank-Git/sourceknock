@@ -93,35 +93,6 @@ typedef struct
     size_t n_triggers;
 } daemon_t;
 
-/* Build an nft-safe table name for a trigger: "inet sourceknock_<service>",
- * with the service sanitized to [a-z0-9_]. */
-static void build_table_name(char *out, size_t outlen, const char *service)
-{
-    size_t i = 0;
-    int n = snprintf(out, outlen, "inet sourceknock_");
-    if (n < 0)
-    {
-        out[0] = '\0';
-        return;
-    }
-    i = (size_t)n;
-    while (*service && i + 1 < outlen)
-    {
-        char c = *service;
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '_')
-        {
-            out[i++] = c;
-        }
-        else
-        {
-            out[i++] = '_';
-        }
-        service++;
-    }
-    out[i] = '\0';
-}
-
 static int find_armed(trigger_state_t *ts, int family, const void *ip)
 {
     for (int i = 0; i < ts->n_armed; i++)
@@ -380,8 +351,13 @@ int main(int argc, char **argv)
         trigger_state_t *t = &d.ts[i];
         t->tr = tr;
 
-        char table[128];
-        build_table_name(table, sizeof(table), tr->service);
+        /* Validated by the config parser: fits, and unique per trigger. */
+        char table[CONFIG_TABLE_NAME_MAX];
+        config_table_name(tr->service, table, sizeof(table));
+
+        char why[160];
+        if (config_weak_sequence(tr, why, sizeof(why)))
+            sk_log("[%s] warning: %s", tr->service, why);
 
         if (reward_init(&t->reward, table, tr->ports, tr->n_ports, tr->protocol,
                         tr->fallback_ttl) != 0)
@@ -433,6 +409,7 @@ int main(int argc, char **argv)
         free(d.ts[i].armed);
     }
     free(d.ts);
+    config_free();
     sk_log("sourceknock stopped");
     return rc == 0 ? 0 : 1;
 
@@ -448,5 +425,6 @@ fail_start:
         kn_free(d.ts[i].admin_ctx);
     }
     free(d.ts);
+    config_free();
     return 1;
 }
