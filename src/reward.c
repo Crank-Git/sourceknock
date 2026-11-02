@@ -27,8 +27,21 @@ static int run_nft(char **args, int quiet)
         fprintf(stderr, "reward: exec nft failed: %s\n", strerror(errno));
         _exit(127);
     }
+    if (pid < 0)
+    {
+        fprintf(stderr, "reward: fork(): %s\n", strerror(errno));
+        return -1;
+    }
     int status = 0;
-    waitpid(pid, &status, 0);
+    pid_t w;
+    do
+        w = waitpid(pid, &status, 0);
+    while (w < 0 && errno == EINTR);
+    if (w < 0)
+    {
+        fprintf(stderr, "reward: waitpid(): %s\n", strerror(errno));
+        return -1;
+    }
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return -1;
@@ -106,31 +119,33 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
     r->fallback_ttl = fallback_ttl > 0 ? fallback_ttl : 30.0;
 
     char cmd[512];
+    int failed = 0; /* any nft command below failing aborts startup */
 
-    /* Table (ignore "already exists"). */
+    /* `add` is idempotent for an identical table/set/chain, so only a real
+     * failure (no nft, no CAP_NET_ADMIN, a conflicting object) is reported. */
     snprintf(cmd, sizeof(cmd), "add table %s", r->table);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
 
     /* Per-family allowed sets (per-element timeout). */
     snprintf(cmd, sizeof(cmd),
              "add set %s %s { type ipv4_addr; flags timeout; size 256; }",
              r->table, r->set_v4);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
     snprintf(cmd, sizeof(cmd),
              "add set %s %s { type ipv6_addr; flags timeout; size 256; }",
              r->table, r->set_v6);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
 
     /* Base chain, policy accept so other traffic is unaffected. */
     snprintf(
         cmd, sizeof(cmd),
         "add chain %s %s { type filter hook input priority 0; policy accept; }",
         r->table, r->chain);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
 
     /* Clear any prior rules (idempotent re-init). */
     snprintf(cmd, sizeof(cmd), "flush chain %s %s", r->table, r->chain);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
 
     /* Let established flows through before any drop rule. A drop in any base
      * chain is final in nftables (an accept elsewhere can't override it), so
@@ -140,7 +155,7 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
     snprintf(cmd, sizeof(cmd),
              "add rule %s %s ct state established,related accept", r->table,
              r->chain);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
 
     /* One accept (per family) + one drop rule per service port. The drop rule
      * matches both families in an inet table. Adding an IP to the allowed set
@@ -151,11 +166,11 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
         snprintf(cmd, sizeof(cmd),
                  "add rule %s %s ip saddr @%s %s dport %d accept", r->table,
                  r->chain, r->set_v4, proto_str(proto), port);
-        run_nft_str(cmd);
+        failed |= run_nft_str(cmd);
         snprintf(cmd, sizeof(cmd),
                  "add rule %s %s ip6 saddr @%s %s dport %d accept", r->table,
                  r->chain, r->set_v6, proto_str(proto), port);
-        run_nft_str(cmd);
+        failed |= run_nft_str(cmd);
 
         /* TCP sessions that were open before conntrack started tracking them
          * (e.g. the admin's SSH session when the daemon first starts on a host
@@ -170,12 +185,25 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
                      "add rule %s %s tcp dport %d tcp flags & (syn | ack) == "
                      "ack accept",
                      r->table, r->chain, port);
-            run_nft_str(cmd);
+            failed |= run_nft_str(cmd);
         }
 
         snprintf(cmd, sizeof(cmd), "add rule %s %s %s dport %d drop", r->table,
                  r->chain, proto_str(proto), port);
-        run_nft_str(cmd);
+        failed |= run_nft_str(cmd);
+    }
+
+    if (failed)
+    {
+        /* Don't leave a half-built table behind: a drop rule without its
+         * accept rules would lock everyone out with no daemon running. */
+        snprintf(cmd, sizeof(cmd), "delete table %s", r->table);
+        run_nft_cmd(cmd, 1);
+        fprintf(stderr,
+                "reward: could not program nftables table %s (is nft "
+                "installed, and do we have CAP_NET_ADMIN?)\n",
+                r->table);
+        return -1;
     }
 
     r->initialized = 1;
@@ -239,6 +267,16 @@ int reward_close(reward_t *r, int family, const void *ip)
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "delete element %s %s { %s }", r->table, set,
              ipstr);
+    return run_nft_str(cmd);
+}
+
+int reward_destroy(reward_t *r)
+{
+    if (!r->initialized)
+        return -1;
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "delete table %s", r->table);
+    r->initialized = 0;
     return run_nft_str(cmd);
 }
 
