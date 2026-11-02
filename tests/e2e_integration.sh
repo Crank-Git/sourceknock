@@ -87,14 +87,46 @@ SK_LISTEN_HOST=$SERVER sudo ip netns exec "$NS" setsid python3 "$LISTENER" "$POR
 for _ in $(seq 1 50); do [ -f "$UP" ] && break; sleep 0.1; done
 [ -f "$UP" ] || { echo "FAIL listener never came up"; fail=$((fail+1)); echo "RESULT: $pass passed, $fail failed"; exit 1; }
 
-: > "$LOG"
-sudo ip netns exec "$NS" setsid "$BIN" "$CONF" >"$LOG" 2>&1 </dev/null &
-for _ in $(seq 1 50); do grep -q "listening for knocks" "$LOG" 2>/dev/null && break; sleep 0.1; done
-grep -q "listening for knocks" "$LOG" || { echo "FAIL daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); echo "RESULT: $pass passed, $fail failed"; exit 1; }
+# Wait for a file to appear (up to ~5s).
+wait_file() { for _ in $(seq 1 50); do [ -f "$1" ] && return 0; sleep 0.1; done; return 1; }
+
+# A connection established BEFORE the daemon starts must survive startup: the
+# daemon's drop rule may only block new connections, never existing flows.
+echo "--- connection opened before daemon start (expect it to survive) ---"
+python3 "$DRIVER" hold "$SERVER" "$PORT" 3 "$WORK/pre_up" >"$WORK/pre_hold.log" 2>&1 &
+PRE_HOLD=$!
+wait_file "$WORK/pre_up" || echo "pre-start hold never connected"
+
+start_daemon() {
+  : > "$LOG"
+  sudo ip netns exec "$NS" setsid "$BIN" "$CONF" >"$LOG" 2>&1 </dev/null &
+  for _ in $(seq 1 50); do grep -q "listening for knocks" "$LOG" 2>/dev/null && return 0; sleep 0.1; done
+  return 1
+}
+start_daemon || { echo "FAIL daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); echo "RESULT: $pass passed, $fail failed"; exit 1; }
+
+if wait $PRE_HOLD; then check "pre-start connection survives daemon start" 1 1; else check "pre-start connection survives daemon start" 1 0; cat "$WORK/pre_hold.log"; fi
 
 echo "mode=$MODE port=$PORT seq=$SEQ duration=$DURATION"
 echo "--- probe BEFORE knock (expect closed) ---"
 if probe; then check "pre-knock closed" 0 1; else check "pre-knock closed" 0 0; fi
+
+# What a scanner sees on the hidden port before any knock. Connection attempts
+# and FIN/NULL scans must be silently dropped. A bare ACK is let through (so
+# sessions that predate conntrack survive) and must look exactly like an ACK
+# to a port nothing listens on: a RST, never an "open" tell.
+echo "--- scanner view of the hidden port (no knock) ---"
+expect_flags() { # label dport kind want
+  local got; got="$(sudo python3 "$DRIVER" flags "$CLIENT" "$SERVER" "$2" "$3")"
+  if [ "$got" = "$4" ]; then echo "PASS  $1 ($3 -> $got)"; pass=$((pass+1));
+  else echo "FAIL  $1 ($3 -> $got, want $4)"; fail=$((fail+1)); fi
+}
+UNUSED_PORT=$((PORT+1))
+ACK_UNUSED="$(sudo python3 "$DRIVER" flags "$CLIENT" "$SERVER" "$UNUSED_PORT" ACK)"
+expect_flags "SYN scan dropped" "$PORT" SYN none
+expect_flags "FIN scan dropped" "$PORT" FIN none
+expect_flags "NULL scan dropped" "$PORT" NULL none
+expect_flags "ACK scan same as an unused port" "$PORT" ACK "$ACK_UNUSED"
 
 echo "--- sending knock $SEQ ---"
 python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
@@ -109,11 +141,27 @@ if [ "$MODE" = "close_on_connect" ]; then
   echo "--- second probe after connect (expect closed) ---"
   sleep 0.3
   if probe; then check "post-connect closed" 0 1; else check "post-connect closed" 0 0; fi
+
+  # Closing the port must only stop NEW connections: a session opened by the
+  # knock keeps exchanging data after the port closes behind it.
+  echo "--- knock again, hold a session open past the close (expect it to survive) ---"
+  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  sleep 0.5
+  python3 "$DRIVER" hold "$SERVER" "$PORT" 3 >"$WORK/hold.log" 2>&1 &
+  HOLD=$!
+  sleep 1
+  if probe; then check "new connection refused while session open" 0 1; else check "new connection refused while session open" 0 0; fi
+  if wait $HOLD; then check "session survives close_on_connect" 1 1; else check "session survives close_on_connect" 1 0; cat "$WORK/hold.log"; fi
 else
+  # Open a session right after the knock and keep it busy past the TTL: the
+  # element expiring must only stop NEW connections.
+  python3 "$DRIVER" hold "$SERVER" "$PORT" $((DURATION+2)) >"$WORK/hold.log" 2>&1 &
+  HOLD=$!
   echo "--- waiting ${DURATION}s for nft TTL ---"
   sleep $((DURATION+1))
   echo "--- probe AFTER ttl (expect closed) ---"
   if probe; then check "post-ttl closed" 0 1; else check "post-ttl closed" 0 0; fi
+  if wait $HOLD; then check "session survives ttl expiry" 1 1; else check "session survives ttl expiry" 1 0; cat "$WORK/hold.log"; fi
 fi
 
 echo

@@ -119,6 +119,16 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
     snprintf(cmd, sizeof(cmd), "flush chain %s %s", r->table, r->chain);
     run_nft_str(cmd);
 
+    /* Let established flows through before any drop rule. A drop in any base
+     * chain is final in nftables (an accept elsewhere can't override it), so
+     * without this, removing an IP from the allowed set - TTL expiry, close on
+     * connect, admin revoke - and even starting the daemon would cut sessions
+     * that are already open. Only NEW connections are gated by the knock. */
+    snprintf(cmd, sizeof(cmd),
+             "add rule %s %s ct state established,related accept", r->table,
+             r->chain);
+    run_nft_str(cmd);
+
     /* One accept (per family) + one drop rule per service port. The drop rule
      * matches both families in an inet table. Adding an IP to the allowed set
      * opens every port, since each accept rule references that set. */
@@ -133,6 +143,22 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
                  "add rule %s %s ip6 saddr @%s %s dport %d accept", r->table,
                  r->chain, r->set_v6, proto_str(proto), port);
         run_nft_str(cmd);
+
+        /* TCP sessions that were open before conntrack started tracking them
+         * (e.g. the admin's SSH session when the daemon first starts on a host
+         * with no other stateful firewall) show up as ct state "new" on their
+         * first mid-stream packet. Accept segments that carry ACK but not SYN:
+         * they can never open a connection (that needs a SYN), and a stray ACK
+         * gets a RST whether or not the port is open, so this leaks nothing to
+         * a scanner. Once accepted, conntrack picks the flow up. */
+        if (proto == PROTO_TCP)
+        {
+            snprintf(cmd, sizeof(cmd),
+                     "add rule %s %s tcp dport %d tcp flags & (syn | ack) == "
+                     "ack accept",
+                     r->table, r->chain, port);
+            run_nft_str(cmd);
+        }
 
         snprintf(cmd, sizeof(cmd), "add rule %s %s %s dport %d drop", r->table,
                  r->chain, proto_str(proto), port);

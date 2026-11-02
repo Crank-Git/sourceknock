@@ -109,6 +109,14 @@ admin_sequence = 9000,8000,7000  # optional revoke knock (permanent mode)
 > or `;`). Inline comments after a value are **not** stripped, so keep value
 > lines free of trailing `#`/`;` (see the notes in `examples/`).
 
+Closing the port (TTL expiry, close on connect, admin revoke) only blocks
+**new** connections. Sessions that are already established keep working: the
+service chain accepts `ct state established,related` ahead of its drop rules,
+and, for TCP, lets through non-SYN segments that carry ACK so sessions that
+predate the daemon (e.g. the SSH session you install it from) survive startup.
+Those segments can't open a connection, and a stray ACK gets the same RST a
+closed port sends, so a scan still sees nothing.
+
 - `mode = fixed_ttl` — keep the port open for `duration` seconds, then close.
 - `mode = close_on_connect` — close as soon as the client makes a connection
   (with `fallback_ttl` as a safety net so a client that never connects can't
