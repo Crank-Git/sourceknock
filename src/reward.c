@@ -1,7 +1,8 @@
 /* reward.c - nftables reward mechanism (Linux). */
+/* Must precede every include (see capture.c). */
+#define _POSIX_C_SOURCE 200809L
 #include "reward.h"
 
-#define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>
@@ -285,11 +286,10 @@ int reward_flush(reward_t *r)
     if (!r->initialized)
         return -1;
     char cmd[512];
-    /* Remove every element from both family sets. */
-    snprintf(cmd, sizeof(cmd), "delete element %s %s { * }", r->table,
-             r->set_v4);
-    run_nft_str(cmd);
-    snprintf(cmd, sizeof(cmd), "delete element %s %s { * }", r->table,
-             r->set_v6);
-    return run_nft_str(cmd);
+    /* Remove every element from both family sets. (`delete element ... { * }`
+     * is not valid nft syntax; it always failed, so nothing was flushed.) */
+    snprintf(cmd, sizeof(cmd), "flush set %s %s", r->table, r->set_v4);
+    int rc = run_nft_str(cmd);
+    snprintf(cmd, sizeof(cmd), "flush set %s %s", r->table, r->set_v6);
+    return run_nft_str(cmd) | rc;
 }

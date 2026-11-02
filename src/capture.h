@@ -19,9 +19,9 @@ typedef struct
     kn_packet_fn on_packet;
     void *arg;
     int fd; /* AF_PACKET fd, -1 on error */
-    /* If non-NULL, capture_run polls *stop after each interrupted read and
-     * returns 0 (clean) as soon as it is non-zero. Wired to the daemon's
-     * signal handler so SIGINT/SIGTERM shut the daemon down. */
+    /* If non-NULL, capture_run checks *stop before every read (reads time out
+     * after 1s) and returns 0 (clean) once it is non-zero. Wired to the
+     * daemon's signal handler so SIGINT/SIGTERM shut the daemon down. */
     volatile sig_atomic_t *stop;
 } capture_t;
 
