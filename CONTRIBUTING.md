@@ -46,7 +46,9 @@ the pure core (no socket code), so it works on any OS with a C compiler.
 `tests/e2e_integration.sh` drives a full knock cycle inside a Linux network
 namespace over a real veth capture interface and real nftables: it knocks,
 asserts the service port opens, then asserts it closes again (on the fixed TTL
-or on first connect). It exits non-zero if any expectation is wrong.
+or on first connect). It also holds long-lived echo sessions open across daemon
+startup and across the port closing, and checks what SYN/FIN/NULL/ACK scans
+see on the hidden port. It exits non-zero if any expectation is wrong.
 
 ```sh
 # on a Linux host with sudo:

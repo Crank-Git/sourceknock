@@ -10,7 +10,8 @@
  *     set allowed_v6 { type ipv6_addr; flags timeout size 256; }
  *     chain service {
  *       type filter hook input priority 0; policy accept (other ports
- * untouched) # one accept (per family) + one drop rule per service port: ip
+ * untouched) ct state established,related accept (open sessions survive the
+ * port closing) # one accept (per family) + one drop rule per service port: ip
  * saddr @allowed_v4 <proto> dport <port1> accept ip6 saddr @allowed_v6 <proto>
  * dport <port1> accept <proto> dport <port1> drop (port closed by default for
  * everyone else)
