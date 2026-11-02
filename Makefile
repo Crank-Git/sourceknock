@@ -2,6 +2,7 @@
 #
 #   make            build the daemon (Linux) + all tests
 #   make test       build and run the cross-platform unit tests (macOS/Linux)
+#   make test-asan  the unit tests under ASan + LSan + UBSan (leaks need Linux)
 #   make daemon     build the sourceknock daemon (requires Linux headers)
 #   make fuzz       build + run the libFuzzer pkt_parse target (Linux, needs
 #                   clang with libFuzzer + AddressSanitizer)
@@ -63,7 +64,7 @@ FUZZ_CXXFLAGS := -O2 -g -std=c++14 -fsanitize=fuzzer,address -Isrc
 # libFuzzer is a clang feature; gcc lacks the runtime.
 FUZZ_CC ?= clang
 
-.PHONY: all test daemon fuzz fuzz-build fuzz-seeds clean format check-format tidy install uninstall
+.PHONY: all test test-asan daemon fuzz fuzz-build fuzz-seeds clean format check-format tidy install uninstall
 
 all: test
 
@@ -97,6 +98,15 @@ test: $(TESTS)
 	@rc=0; for t in $(TESTS); do ./$$t || rc=1; done; \
 	 if [ $$rc -eq 0 ]; then echo "ALL GREEN"; else echo "FAILURES ABOVE"; fi; \
 	 exit $$rc
+
+# Same suites, rebuilt with AddressSanitizer (+ LeakSanitizer on Linux) and
+# UBSan. Any leak, overflow or UB fails the run.
+SAN_FLAGS := -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined \
+             -fno-sanitize-recover=undefined
+test-asan:
+	$(MAKE) clean
+	$(MAKE) test CFLAGS="$(CFLAGS) $(SAN_FLAGS)" LDFLAGS="$(LDFLAGS) $(SAN_FLAGS)"
+	$(MAKE) clean
 
 %_test.o: tests/%_test.c
 	$(CC) $(CFLAGS) -Isrc -Itests -c $< -o $@

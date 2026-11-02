@@ -41,6 +41,13 @@ make test       # build + run the cross-platform unit tests
 This runs `state_test`, `packet_test`, `config_test`, and `close_test` against
 the pure core (no socket code), so it works on any OS with a C compiler.
 
+```sh
+make test-asan  # the same suites under ASan + LeakSanitizer + UBSan
+```
+
+CI runs `make test-asan` on Linux, where LeakSanitizer is available, so a leak
+anywhere in the parsers fails the build.
+
 ### Integration (e2e) test — Linux + root only
 
 `tests/e2e_integration.sh` drives a full knock cycle inside a Linux network

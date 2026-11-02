@@ -48,6 +48,22 @@ int config_parse_string(const char *text, char *err, size_t errlen);
 /* Load from a file path. Returns 0 on success. */
 int config_parse_file(const char *path, char *err, size_t errlen);
 
+/* Free the triggers owned by g_cfg (safe to call more than once). */
+void config_free(void);
+
+/* Size of reward_t's table buffer: the full nft table name incl. NUL. */
+#define CONFIG_TABLE_NAME_MAX 64
+
+/* Build the nft table name for a service: "inet sourceknock_<service>", with
+ * the service sanitized to [A-Za-z0-9_]. Returns -1 (instead of truncating)
+ * if it would not fit in `outlen`. */
+int config_table_name(const char *service, char *out, size_t outlen);
+
+/* Returns 1 and a human-readable reason in `msg` if the trigger's sequence is
+ * weak (fewer than 3 ports, or a port in the Linux ephemeral range that
+ * ordinary outgoing traffic uses), else 0. Advisory: the daemon warns. */
+int config_weak_sequence(const trigger_t *tr, char *msg, size_t msglen);
+
 extern config_t g_cfg; /* populated by the above; used by the daemon */
 
 #endif /* SOURCEKNOCK_CONFIG_H */

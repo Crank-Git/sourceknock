@@ -95,19 +95,35 @@ interface = eth0
 
 [trigger:ssh]
 service = ssh
-port = 22                 # hidden service port(s) to open
-protocol = tcp            # tcp or udp
-sequence = 7000,8000,9000 # ordered source-port knock
-window = 5                # whole sequence must complete within N seconds
-mode = fixed_ttl          # fixed_ttl | close_on_connect | permanent
-duration = 30             # seconds the port stays open (fixed_ttl)
-fallback_ttl = 300        # safety max open time (close_on_connect)
-admin_sequence = 9000,8000,7000  # optional revoke knock (permanent mode)
+# hidden service port(s) to open
+port = 22
+# tcp or udp
+protocol = tcp
+# ordered source-port knock
+sequence = 7000,8000,9000
+# whole sequence must complete within N seconds
+window = 5
+# fixed_ttl | close_on_connect | permanent
+mode = fixed_ttl
+# seconds the port stays open (fixed_ttl)
+duration = 30
+# safety max open time (close_on_connect)
+fallback_ttl = 300
+# optional revoke knock (permanent mode)
+admin_sequence = 9000,8000,7000
 ```
 
 > **Note:** the parser strips only full-line comments (lines starting with `#`
 > or `;`). Inline comments after a value are **not** stripped, so keep value
 > lines free of trailing `#`/`;` (see the notes in `examples/`).
+
+The daemon refuses to start on a config it can't use: a key outside any
+section, a trigger without `port` or `sequence`, a source port of 0 in a
+sequence, or two triggers whose service names map to the same nftables table
+(names are sanitized to `[A-Za-z0-9_]`, so `web-1` and `web_1` collide, and must
+be at most 46 characters). It logs a warning (but starts) for a sequence
+shorter than 3 ports or one using the Linux ephemeral range 32768-60999, which
+ordinary outgoing connections use.
 
 Closing the port (TTL expiry, close on connect, admin revoke) only blocks
 **new** connections. Sessions that are already established keep working: the

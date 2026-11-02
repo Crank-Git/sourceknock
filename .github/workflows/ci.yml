@@ -23,6 +23,13 @@ jobs:
       - name: Run unit tests (cross-platform core)
         run: make test
 
+      # Same suites under ASan + LeakSanitizer + UBSan (LSan is Linux-only).
+      - name: Run unit tests under sanitizers (Linux)
+        if: runner.os == 'Linux'
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        run: make test-asan
+
       # The daemon layer (AF_PACKET / nftables) is Linux-only, so only build
       # it where the Linux kernel headers are available.
       - name: Build daemon (Linux)
