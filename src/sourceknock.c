@@ -352,6 +352,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Open the capture first: a bad interface name should fail before any
+     * firewall rule is touched. */
+    capture_t cap;
+    if (capture_open(&cap, g_cfg.interface, on_packet, &d) != 0)
+    {
+        fprintf(stderr, "capture open failed (need root?)\n");
+        free(d.ts);
+        return 1;
+    }
+
     /* Per-trigger: reward table (namespaced by service) + state machine. */
     for (size_t i = 0; i < d.n_triggers; i++)
     {
@@ -367,7 +377,7 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "reward init failed for trigger '%s'\n",
                     tr->service);
-            return 1;
+            goto fail_start;
         }
 
         knock_sequence_t seq = {.ports = tr->sequence, .len = tr->seq_len};
@@ -376,7 +386,7 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "state machine create failed for trigger '%s'\n",
                     tr->service);
-            return 1;
+            goto fail_start;
         }
         kn_set_complete(t->ctx, on_complete, t);
 
@@ -391,18 +401,10 @@ int main(int argc, char **argv)
                 fprintf(stderr,
                         "admin state machine create failed for trigger '%s'\n",
                         tr->service);
-                return 1;
+                goto fail_start;
             }
             kn_set_complete(t->admin_ctx, on_revoke, t);
         }
-    }
-
-    /* capture */
-    capture_t cap;
-    if (capture_open(&cap, g_cfg.interface, on_packet, &d) != 0)
-    {
-        fprintf(stderr, "capture open failed (need root?)\n");
-        return 1;
     }
 
     cap.stop = &g_stop;
@@ -422,4 +424,18 @@ int main(int argc, char **argv)
     free(d.ts);
     sk_log("sourceknock stopped");
     return rc == 0 ? 0 : 1;
+
+fail_start:
+    /* Startup failed after some triggers may already have been programmed.
+     * Remove their tables so we never exit leaving a service port closed with
+     * no daemon to open it. */
+    capture_close(&cap);
+    for (size_t i = 0; i < d.n_triggers; i++)
+    {
+        reward_destroy(&d.ts[i].reward);
+        kn_free(d.ts[i].ctx);
+        kn_free(d.ts[i].admin_ctx);
+    }
+    free(d.ts);
+    return 1;
 }

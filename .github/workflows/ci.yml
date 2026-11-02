@@ -52,7 +52,7 @@ jobs:
       - name: Install nftables (Linux e2e)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y nftables
+          sudo apt-get install -y nftables libcap2-bin
           nft --version
       - name: Run e2e integration test (fixed_ttl)
         if: runner.os == 'Linux'

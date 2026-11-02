@@ -91,6 +91,50 @@ SK_LISTEN_HOST=$SERVER sudo ip netns exec "$NS" setsid python3 "$LISTENER" "$POR
 for _ in $(seq 1 50); do [ -f "$UP" ] && break; sleep 0.1; done
 [ -f "$UP" ] || { echo "FAIL listener never came up"; fail=$((fail+1)); echo "RESULT: $pass passed, $fail failed"; exit 1; }
 
+# ---- startup failures must refuse to run AND leave the host as it was ----
+# Each case: the daemon exits non-zero, never reports "listening for knocks",
+# leaves no sourceknock table behind, and the service port is still reachable
+# exactly as it was before the daemon ran.
+nft_tables() { sudo ip netns exec "$NS" nft list tables 2>/dev/null | grep -c sourceknock; }
+expect_refuse() { # label conf [nocap]
+  local label="$1" conf="$2" out="$WORK/refuse.log" rc
+  if [ "${3:-}" = "nocap" ]; then
+    # Drop CAP_NET_ADMIN from the bounding set: still root, raw sockets work,
+    # but nft can't touch the ruleset.
+    sudo ip netns exec "$NS" timeout 10 capsh --drop=cap_net_admin -- -c "exec '$BIN' '$conf'" >"$out" 2>&1 </dev/null; rc=$?
+  else
+    sudo ip netns exec "$NS" timeout 10 "$BIN" "$conf" >"$out" 2>&1 </dev/null; rc=$?
+  fi
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && ! grep -q "listening for knocks" "$out"; then
+    check "$label: refuses to start (exit $rc)" 1 1
+  else
+    check "$label: refuses to start (exit $rc)" 1 0; tail -5 "$out"
+  fi
+  local left; left="$(nft_tables)"
+  if [ "$left" = "0" ]; then check "$label: no table left behind" 1 1; else check "$label: no table left behind ($left)" 1 0; fi
+  if probe; then check "$label: port untouched" 1 1; else check "$label: port untouched" 1 0; fi
+  sudo ip netns exec "$NS" nft flush ruleset
+}
+
+echo "--- startup failures ---"
+expect_refuse "no CAP_NET_ADMIN" "$CONF" nocap
+grep -q "could not program nftables" "$WORK/refuse.log" && check "no CAP_NET_ADMIN: says why" 1 1 || check "no CAP_NET_ADMIN: says why" 1 0
+
+sed 's/^interface = .*/interface = sk-nosuch0/' "$CONF" > "$WORK/badif.conf"
+expect_refuse "unknown interface" "$WORK/badif.conf"
+
+# An nft object the daemon can't reconcile (allowed_v4 with the wrong type).
+sudo ip netns exec "$NS" nft add table inet "sourceknock_$SERVICE"
+sudo ip netns exec "$NS" nft add set inet "sourceknock_$SERVICE" allowed_v4 '{ type ipv6_addr; }'
+expect_refuse "conflicting nft set" "$CONF"
+
+# Second trigger fails after the first was fully programmed: the first
+# trigger's table must be removed too, or its drop rule would lock the port.
+{ cat "$CONF"; printf '\n[trigger:other]\nservice = other\nport = %s\nsequence = 4400,5500,6600\n' "$((PORT+5))"; } > "$WORK/two.conf"
+sudo ip netns exec "$NS" nft add table inet sourceknock_other
+sudo ip netns exec "$NS" nft add set inet sourceknock_other allowed_v4 '{ type ipv6_addr; }'
+expect_refuse "second trigger fails" "$WORK/two.conf"
+
 # Wait for a file to appear (up to ~5s).
 wait_file() { for _ in $(seq 1 50); do [ -f "$1" ] && return 0; sleep 0.1; done; return 1; }
 
