@@ -5,59 +5,131 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-/* Compare two addresses of the same family. Returns 0 if equal. */
-static int addr_eq(int family, const void *a, const void *b)
+/* FNV-1a over the seed, family and address bytes. */
+static uint32_t client_hash(const kn_ctx_t *ctx, int family, const void *ip)
 {
-    return memcmp(a, b, pkt_addr_len(family)) == 0;
+    uint32_t h = 2166136261u ^ ctx->seed;
+    h = (h ^ (uint32_t)family) * 16777619u;
+    const unsigned char *p = ip;
+    for (size_t i = 0; i < pkt_addr_len(family); i++)
+        h = (h ^ p[i]) * 16777619u;
+    return h;
 }
 
-static kn_client_t *find_client(kn_ctx_t *ctx, int family, const void *ip)
+static size_t bucket_of(const kn_ctx_t *ctx, int family, const void *ip)
 {
-    for (size_t i = 0; i < ctx->n_clients; i++)
-    {
-        if (ctx->clients[i].family == family &&
-            addr_eq(family, &ctx->clients[i].addr, ip))
-            return &ctx->clients[i];
-    }
-    return NULL;
+    return client_hash(ctx, family, ip) & (ctx->n_buckets - 1);
 }
 
-/* Grow the client table if needed. Returns 0 on success. */
-static int ensure_client(kn_ctx_t *ctx, int family, const void *ip,
-                         kn_client_t **out)
+static int find_slot(const kn_ctx_t *ctx, int family, const void *ip)
 {
-    /* Reuse existing? */
-    kn_client_t *c = find_client(ctx, family, ip);
-    if (c)
+    for (int i = ctx->buckets[bucket_of(ctx, family, ip)]; i >= 0;
+         i = ctx->slots[i].hnext)
     {
-        *out = c;
-        return 0;
+        const kn_client_t *c = &ctx->slots[i];
+        if (c->family == family &&
+            memcmp(&c->addr, ip, pkt_addr_len(family)) == 0)
+            return i;
     }
+    return -1;
+}
 
-    if (ctx->n_clients == ctx->cap_clients)
-    {
-        size_t newcap = ctx->cap_clients ? ctx->cap_clients * 2 : 16;
-        kn_client_t *nc = realloc(ctx->clients, newcap * sizeof(*nc));
-        if (!nc)
-            return -1;
-        ctx->clients = nc;
-        ctx->cap_clients = newcap;
-    }
-    c = &ctx->clients[ctx->n_clients++];
+/* Unlink slot `i` from its hash chain and the age list, and free it. */
+static void remove_slot(kn_ctx_t *ctx, int i)
+{
+    kn_client_t *c = &ctx->slots[i];
+
+    int *pp = &ctx->buckets[bucket_of(ctx, c->family, &c->addr)];
+    while (*pp != i)
+        pp = &ctx->slots[*pp].hnext;
+    *pp = c->hnext;
+
+    if (c->older >= 0)
+        ctx->slots[c->older].newer = c->newer;
+    else
+        ctx->oldest = c->newer;
+    if (c->newer >= 0)
+        ctx->slots[c->newer].older = c->older;
+    else
+        ctx->newest = c->older;
+
+    memset(c, 0, sizeof(*c));
+    c->hnext = ctx->free_head;
+    ctx->free_head = i;
+    ctx->n_clients--;
+}
+
+static int expired(const kn_ctx_t *ctx, const kn_client_t *c, double now)
+{
+    return (now - c->start_time) > ctx->window;
+}
+
+/* Start tracking a client that just sent seq[0]. Never fails: expired entries
+ * are swept first, and if the table is still full the oldest in-progress knock
+ * is evicted. Entries are appended in time order, so the oldest is the head of
+ * the age list. */
+static int add_slot(kn_ctx_t *ctx, int family, const void *ip, double now)
+{
+    while (ctx->oldest >= 0 && expired(ctx, &ctx->slots[ctx->oldest], now))
+        remove_slot(ctx, ctx->oldest);
+    if (ctx->free_head < 0)
+        remove_slot(ctx, ctx->oldest);
+
+    int i = ctx->free_head;
+    kn_client_t *c = &ctx->slots[i];
+    ctx->free_head = c->hnext;
+
     memset(c, 0, sizeof(*c));
     c->family = family;
     memcpy(&c->addr, ip, pkt_addr_len(family));
-    c->state = KNOCK_IDLE;
-    *out = c;
-    return 0;
+    c->start_time = now;
+
+    size_t b = bucket_of(ctx, family, ip);
+    c->hnext = ctx->buckets[b];
+    ctx->buckets[b] = i;
+
+    c->older = ctx->newest;
+    c->newer = -1;
+    if (ctx->newest >= 0)
+        ctx->slots[ctx->newest].newer = i;
+    else
+        ctx->oldest = i;
+    ctx->newest = i;
+
+    ctx->n_clients++;
+    return i;
 }
 
-kn_ctx_t *kn_create(const knock_sequence_t *seq, double window)
+/* Best-effort per-context seed; falls back to time/address if /dev/urandom is
+ * unavailable. */
+static uint32_t make_seed(const void *salt)
+{
+    uint32_t seed = 0;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f)
+    {
+        if (fread(&seed, sizeof(seed), 1, f) != 1)
+            seed = 0;
+        fclose(f);
+    }
+    if (seed == 0)
+        seed = (uint32_t)time(NULL) ^ (uint32_t)(uintptr_t)salt;
+    return seed;
+}
+
+kn_ctx_t *kn_create_bounded(const knock_sequence_t *seq, double window,
+                            size_t max_clients)
 {
     if (!seq || !seq->ports || seq->len == 0)
     {
         fprintf(stderr, "sourceknock: sequence must be non-empty\n");
+        return NULL;
+    }
+    if (max_clients == 0 || max_clients > (1u << 24))
+    {
+        fprintf(stderr, "sourceknock: max_clients out of range\n");
         return NULL;
     }
 
@@ -65,16 +137,37 @@ kn_ctx_t *kn_create(const knock_sequence_t *seq, double window)
     if (!ctx)
         return NULL;
 
+    size_t nb = 1;
+    while (nb < 2 * max_clients)
+        nb <<= 1;
+
     ctx->seq.ports = malloc(seq->len * sizeof(uint16_t));
-    if (!ctx->seq.ports)
+    ctx->slots = calloc(max_clients, sizeof(*ctx->slots));
+    ctx->buckets = malloc(nb * sizeof(*ctx->buckets));
+    if (!ctx->seq.ports || !ctx->slots || !ctx->buckets)
     {
-        free(ctx);
+        kn_free(ctx);
         return NULL;
     }
     memcpy(ctx->seq.ports, seq->ports, seq->len * sizeof(uint16_t));
     ctx->seq.len = seq->len;
     ctx->window = window;
+
+    ctx->max_clients = max_clients;
+    ctx->n_buckets = nb;
+    for (size_t i = 0; i < nb; i++)
+        ctx->buckets[i] = -1;
+    for (size_t i = 0; i < max_clients; i++)
+        ctx->slots[i].hnext = (i + 1 < max_clients) ? (int)(i + 1) : -1;
+    ctx->free_head = 0;
+    ctx->oldest = ctx->newest = -1;
+    ctx->seed = make_seed(ctx);
     return ctx;
+}
+
+kn_ctx_t *kn_create(const knock_sequence_t *seq, double window)
+{
+    return kn_create_bounded(seq, window, KN_DEFAULT_MAX_CLIENTS);
 }
 
 void kn_free(kn_ctx_t *ctx)
@@ -82,7 +175,8 @@ void kn_free(kn_ctx_t *ctx)
     if (!ctx)
         return;
     free(ctx->seq.ports);
-    free(ctx->clients);
+    free(ctx->slots);
+    free(ctx->buckets);
     free(ctx);
 }
 
@@ -94,50 +188,48 @@ void kn_set_complete(kn_ctx_t *ctx, kn_complete_fn fn, void *arg)
 
 kn_client_t *kn_find(kn_ctx_t *ctx, int family, const void *ip)
 {
-    kn_client_t *c = find_client(ctx, family, ip);
-    if (c && c->state != KNOCK_IDLE)
-        return c;
-    return NULL;
+    int i = find_slot(ctx, family, ip);
+    return i >= 0 ? &ctx->slots[i] : NULL;
 }
 
-/* Reset a single client's progress. */
-static void client_reset(kn_client_t *c)
-{
-    c->index = 0;
-    c->state = KNOCK_IDLE;
-    c->start_time = 0.0;
-}
+size_t kn_count(const kn_ctx_t *ctx) { return ctx->n_clients; }
 
 kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip, uint16_t sport,
                     double now)
 {
-    kn_client_t *c;
-    if (ensure_client(ctx, family, ip, &c) != 0)
-        return -1;
+    int i = find_slot(ctx, family, ip);
 
-    /* Timed out? If progress started but the window elapsed, wipe it. */
-    if (c->state != KNOCK_IDLE && (now - c->start_time) > ctx->window)
+    /* Timed out? The whole sequence must finish within the window. */
+    if (i >= 0 && expired(ctx, &ctx->slots[i], now))
     {
-        client_reset(c);
+        remove_slot(ctx, i);
+        i = -1;
     }
 
-    if (c->state == KNOCK_IDLE)
+    if (i < 0)
     {
-        /* Waiting for the first knock to match seq[0]. */
-        if (sport == ctx->seq.ports[0])
+        /* Not mid-knock: only the first knock port creates any state, so
+         * ordinary traffic and spoofed noise cost nothing. */
+        if (sport != ctx->seq.ports[0])
+            return KNOCK_IGNORE;
+        if (ctx->seq.len == 1)
         {
-            c->index = 1;
-            c->state = KNOCK_KNOCKING;
-            c->start_time = now;
-            return KNOCK_PROGRESS;
+            if (ctx->on_complete)
+                ctx->on_complete(ctx, family, ip, ctx->complete_arg);
+            return KNOCK_TRIGGER;
         }
-        return KNOCK_IGNORE;
+        i = add_slot(ctx, family, ip, now);
+        ctx->slots[i].index = 1;
+        ctx->slots[i].state = KNOCK_KNOCKING;
+        return KNOCK_PROGRESS;
     }
+
+    kn_client_t *c = &ctx->slots[i];
 
     /* Currently knocking: strict ordering, no tolerance. */
     if (sport != ctx->seq.ports[c->index])
     {
-        client_reset(c);
+        remove_slot(ctx, i);
         return KNOCK_RESET;
     }
 
@@ -147,8 +239,8 @@ kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip, uint16_t sport,
         c->state = KNOCK_COMPLETE;
         if (ctx->on_complete)
             ctx->on_complete(ctx, family, ip, ctx->complete_arg);
-        /* Reset so the next knock starts fresh. */
-        client_reset(c);
+        /* Done: drop the entry so the next knock starts fresh. */
+        remove_slot(ctx, i);
         return KNOCK_TRIGGER;
     }
 
