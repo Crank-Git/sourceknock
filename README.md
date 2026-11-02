@@ -120,7 +120,9 @@ closed port sends, so a scan still sees nothing.
 - `mode = fixed_ttl` — keep the port open for `duration` seconds, then close.
 - `mode = close_on_connect` — close as soon as the client makes a connection
   (with `fallback_ttl` as a safety net so a client that never connects can't
-  leave the port open forever).
+  leave the port open forever). The safety net is the nft element's own
+  timeout, so the kernel closes the port even if the daemon sees no further
+  traffic, is stopped, or crashes.
   - **TCP:** the first packet to a service port (the connection's SYN) closes
     the port.
   - **UDP:** there is no handshake, so the first *subsequent* UDP packet to a
@@ -231,7 +233,8 @@ capture open.
 
 - In `fixed_ttl` mode the port closes after `duration` seconds (nft element
   timeout). In `close_on_connect` it closes on the first connection, with
-  `fallback_ttl` as a safety net.
+  `fallback_ttl` as a kernel-enforced safety net (also an nft element
+  timeout). Knocking again while the port is open restarts the timer.
 - For UDP there is no handshake, so `close_on_connect` fires on the first
   subsequent UDP packet to the service port — the arming knock itself does not
   close the port the instant it opens.

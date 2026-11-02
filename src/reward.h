@@ -47,8 +47,10 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
                 size_t n_ports, proto_t proto, double fallback_ttl);
 
 /* Open the port for `ip`. `family` is AF_INET or AF_INET6 and `ip` points at
- * the matching address struct. For fixed_ttl modes the caller passes a
- * timeout; pass <=0 for "no timeout" (close_on_connect). Returns 0. */
+ * the matching address struct. `timeout` is the kernel-enforced lifetime of the
+ * element (duration for fixed_ttl, fallback_ttl for close_on_connect); pass <=0
+ * for "no timeout" (permanent). Re-opening an open IP restarts its timeout.
+ * Returns 0 on success. */
 int reward_open(reward_t *r, int family, const void *ip, double timeout);
 
 /* Close the port for `ip` (remove from the family's allowed set). Returns 0. */
