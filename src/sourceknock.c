@@ -77,8 +77,12 @@ typedef struct
     reward_t reward;
     kn_ctx_t *ctx;       /* primary: completes -> open the port */
     kn_ctx_t *admin_ctx; /* optional: completes -> revoke (remove IP) */
-    armed_entry_t armed[64];
+    /* close_on_connect clients awaiting their connection. Growable: the nft
+     * element carries the real fallback_ttl, so this list only drives the
+     * early close and logging, and must never silently drop a client. */
+    armed_entry_t *armed;
     int n_armed;
+    int cap_armed;
 } trigger_state_t;
 
 typedef struct
@@ -128,8 +132,27 @@ static int find_armed(trigger_state_t *ts, int family, const void *ip)
 static void arm_ip(trigger_state_t *ts, int family, const void *ip,
                    double deadline)
 {
-    if (ts->n_armed >= 64)
+    /* A re-knock from an armed client just refreshes its deadline. */
+    int idx = find_armed(ts, family, ip);
+    if (idx >= 0)
+    {
+        ts->armed[idx].deadline = deadline;
         return;
+    }
+    if (ts->n_armed == ts->cap_armed)
+    {
+        int ncap = ts->cap_armed ? ts->cap_armed * 2 : 16;
+        armed_entry_t *na = realloc(ts->armed, (size_t)ncap * sizeof(*na));
+        if (!na)
+        {
+            /* The kernel still expires the element at fallback_ttl. */
+            sk_log("[%s] out of memory tracking armed client", ts->tr->service);
+            return;
+        }
+        ts->armed = na;
+        ts->cap_armed = ncap;
+    }
+    memset(&ts->armed[ts->n_armed], 0, sizeof(ts->armed[ts->n_armed]));
     ts->armed[ts->n_armed].family = family;
     memcpy(&ts->armed[ts->n_armed].addr, ip, pkt_addr_len(family));
     ts->armed[ts->n_armed].deadline = deadline;
@@ -159,7 +182,10 @@ static void fmt_ports(const trigger_t *tr, char *out, size_t n)
     out[off] = '\0';
 }
 
-/* Remove armed entries whose deadline has passed (safety net). */
+/* Forget armed entries whose fallback_ttl has passed. The nft element was
+ * added with fallback_ttl as its timeout, so the kernel has already closed the
+ * port (even if this daemon saw no packets, or wasn't running); this only
+ * tidies our list and logs it. */
 static void cleanup_armed(trigger_state_t *ts, double now)
 {
     int i = 0;
@@ -169,8 +195,8 @@ static void cleanup_armed(trigger_state_t *ts, double now)
         {
             char s[48];
             ipstr(ts->armed[i].family, &ts->armed[i].addr, s, sizeof(s));
-            sk_log("fallback_ttl reached: closing port for %s (no connect)", s);
-            reward_close(&ts->reward, ts->armed[i].family, &ts->armed[i].addr);
+            sk_log("[%s] fallback_ttl reached for %s (no connect): port closed",
+                   ts->tr->service, s);
             drop_armed(ts, i);
         }
         else
@@ -189,7 +215,13 @@ static void on_complete(kn_ctx_t *ctx, int family, const void *ip, void *arg)
     char s[48];
     ipstr(family, ip, s, sizeof(s));
 
-    double timeout = (tr->mode == MODE_FIXED_TTL) ? tr->duration : 0.0;
+    /* Every non-permanent mode gets a kernel-enforced timeout, so the port
+     * closes even if the daemon never sees another packet or dies. */
+    double timeout = 0.0;
+    if (tr->mode == MODE_FIXED_TTL)
+        timeout = tr->duration;
+    else if (tr->mode == MODE_CLOSE_ON_CONNECT)
+        timeout = tr->fallback_ttl;
     const char *proto = (tr->protocol == PROTO_UDP) ? "udp" : "tcp";
 
     if (reward_open(&ts->reward, family, ip, timeout) == 0)
@@ -385,6 +417,7 @@ int main(int argc, char **argv)
         reward_flush(&d.ts[i].reward);
         kn_free(d.ts[i].ctx);
         kn_free(d.ts[i].admin_ctx);
+        free(d.ts[i].armed);
     }
     free(d.ts);
     sk_log("sourceknock stopped");

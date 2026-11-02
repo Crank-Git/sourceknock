@@ -10,12 +10,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* Run `nft <args...>`. Returns child exit status, -1 on exec failure. */
-static int run_nft(char **args)
+/* Run `nft <args...>`. Returns child exit status, -1 on exec failure. With
+ * `quiet`, nft's own error output is discarded (for commands whose failure is
+ * expected, e.g. deleting an element that may not exist). */
+static int run_nft(char **args, int quiet)
 {
     pid_t pid = fork();
     if (pid == 0)
     {
+        if (quiet && !freopen("/dev/null", "w", stderr))
+            _exit(127);
         /* The daemon runs as root; don't let a hostile PATH redirect the
          * nft binary. Pin a sane PATH in the child before exec. */
         setenv("PATH", "/usr/sbin:/sbin:/usr/bin:/bin", 1);
@@ -32,7 +36,7 @@ static int run_nft(char **args)
 
 /* Run `nft <cmd>` where cmd is whitespace-separated tokens. Returns 0 on
  * nft exit 0. */
-static int run_nft_str(const char *cmd)
+static int run_nft_cmd(const char *cmd, int quiet)
 {
     char work[512];
     char *argv[64];
@@ -56,17 +60,26 @@ static int run_nft_str(const char *cmd)
         return -1;
     argv[n] = NULL;
 
-    int rc = run_nft(argv);
-    if (rc != 0)
+    int rc = run_nft(argv, quiet);
+    if (rc != 0 && !quiet)
         fprintf(stderr, "reward: nft '%s' failed (exit %d)\n", cmd, rc);
     return rc == 0 ? 0 : -1;
 }
+
+static int run_nft_str(const char *cmd) { return run_nft_cmd(cmd, 0); }
 
 /* Format a timeout in seconds as an nft duration string. */
 static void fmt_timeout(char *out, size_t outlen, double secs)
 {
     long s = (long)secs;
-    if (s % 60 == 0 && s >= 60)
+    if ((double)s != secs)
+    {
+        /* Fractional seconds (e.g. fallback_ttl = 1.5): use milliseconds
+         * rather than truncating, which could produce a 0s timeout. */
+        long ms = (long)(secs * 1000.0 + 0.5);
+        snprintf(out, outlen, "%ldms", ms > 0 ? ms : 1);
+    }
+    else if (s % 60 == 0 && s >= 60)
         /* nft duration units are single-letter: s/m/h/d. The word "min" is
          * rejected by modern nft, so emit "m" for minutes. */
         snprintf(out, outlen, "%ldm", s / 60);
@@ -193,6 +206,12 @@ int reward_open(reward_t *r, int family, const void *ip, double timeout)
     char to[32];
     if (timeout > 0)
     {
+        /* `add element` on an element that already exists is a no-op and
+         * keeps its old timeout, so a re-knock would not restart the clock.
+         * Drop any existing element first (it may well not exist). */
+        snprintf(cmd, sizeof(cmd), "delete element %s %s { %s }", r->table, set,
+                 ipstr);
+        run_nft_cmd(cmd, 1);
         fmt_timeout(to, sizeof(to), timeout);
         snprintf(cmd, sizeof(cmd), "add element %s %s { %s timeout %s }",
                  r->table, set, ipstr, to);

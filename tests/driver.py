@@ -5,8 +5,9 @@
       Send one UDP datagram per source port (bound to that source port) so the
       daemon reads the knock sequence from the clients' source ports.
 
-  probe <server_ip> <port> <timeout_s>
-      Attempt a TCP connect; exit 0 if the port is reachable, 1 otherwise.
+  probe <server_ip> <port> <timeout_s> [source_ip]
+      Attempt a TCP connect (optionally from source_ip); exit 0 if the port is
+      reachable, 1 otherwise.
 
   hold <server_ip> <port> <seconds> [ready_file]
       Open one TCP connection and keep exchanging data with the echo listener
@@ -41,10 +42,12 @@ def knock(client_ip, server_ip, delay, ports, dest_port=2222):
             time.sleep(delay)
 
 
-def probe(server_ip, port, timeout):
+def probe(server_ip, port, timeout, source_ip=None):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
+        if source_ip:
+            s.bind((source_ip, 0))
         s.connect((server_ip, port))
         return True
     except OSError:
@@ -137,8 +140,9 @@ def main(argv):
         knock(client, server, float(delay), [int(x) for x in ports.split(",")], dest)
         return 0
     if argv[1] == "probe":
-        _, _, server, port, timeout = argv
-        return 0 if probe(server, int(port), float(timeout)) else 1
+        _, _, server, port, timeout, *rest = argv
+        src = rest[0] if rest else None
+        return 0 if probe(server, int(port), float(timeout), src) else 1
     if argv[1] == "hold":
         _, _, server, port, seconds, *rest = argv
         ready = rest[0] if rest else None

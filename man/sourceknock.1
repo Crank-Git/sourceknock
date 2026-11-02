@@ -111,6 +111,8 @@ Seconds the port stays open with
 Safety maximum open time for
 .BI close_on_connect
 so a client that never connects cannot leave the port open forever (default 300).
+Enforced by the kernel as the nft element timeout, so it holds even if the
+daemon is not running.
 .IP \(bu 2
 .B admin_sequence
 Optional revoke knock for

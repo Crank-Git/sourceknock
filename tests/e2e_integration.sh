@@ -48,11 +48,15 @@ PORT="$(awk -F= '/^[[:space:]]*port[[:space:]]*/{gsub(/[^0-9]/,"",$2);print $2;e
 SEQ="${SEQ_ARG:-$(awk -F= '/^[[:space:]]*sequence[[:space:]]*/{gsub(/[^0-9,]/,"",$2);print $2;exit}' "$CONF")}"
 DURATION="$(awk -F= '/^[[:space:]]*duration[[:space:]]*/{gsub(/[^0-9]/,"",$2);print $2;exit}' "$CONF")"
 DURATION="${DURATION:-4}"
+FALLBACK="$(awk -F= '/^[[:space:]]*fallback_ttl[[:space:]]*/{gsub(/[^0-9]/,"",$2);print $2;exit}' "$CONF")"
+FALLBACK="${FALLBACK:-300}"
+SERVICE="$(awk -F= '/^[[:space:]]*service[[:space:]]*/{gsub(/[^A-Za-z0-9_]/,"",$2);print $2;exit}' "$CONF")"
 
 cleanup() {
   sudo pkill -f 'sourceknock .*/sourceknock.conf' 2>/dev/null
   sudo pkill -f 'listener\.py' 2>/dev/null
   sudo ip netns del "$NS" 2>/dev/null
+  sudo pkill -9 -f "$BIN" 2>/dev/null
   sudo ip addr del $CLIENT/24 dev e2e-c 2>/dev/null
   sudo ip link del e2e-c 2>/dev/null
   # tidy leftover state from a previous interrupted run
@@ -152,6 +156,41 @@ if [ "$MODE" = "close_on_connect" ]; then
   sleep 1
   if probe; then check "new connection refused while session open" 0 1; else check "new connection refused while session open" 0 0; fi
   if wait $HOLD; then check "session survives close_on_connect" 1 1; else check "session survives close_on_connect" 1 0; cat "$WORK/hold.log"; fi
+
+  # fallback_ttl must be enforced by the kernel, not by the daemon noticing a
+  # later packet: knock, then send NOTHING to the server until it has passed.
+  echo "--- knock, stay silent for fallback_ttl=${FALLBACK}s (expect closed) ---"
+  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  sleep $((FALLBACK+1))
+  if probe; then check "fallback_ttl closes on a quiet interface" 0 1; else check "fallback_ttl closes on a quiet interface" 0 0; fi
+
+  # ...and must still hold if the daemon dies right after arming the port.
+  echo "--- knock, SIGKILL the daemon, wait fallback_ttl (expect closed) ---"
+  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  sleep 0.5
+  sudo pkill -9 -f "$BIN"
+  sleep $((FALLBACK+1))
+  if probe; then check "fallback_ttl closes after daemon SIGKILL" 0 1; else check "fallback_ttl closes after daemon SIGKILL" 0 0; fi
+  start_daemon || { echo "FAIL daemon did not restart"; fail=$((fail+1)); }
+
+  # More armed clients than the old fixed 64-slot table: every one of them must
+  # be able to connect, and every element must expire at fallback_ttl.
+  echo "--- 70 clients knock at once ---"
+  MANY=70
+  for i in $(seq 1 $MANY); do sudo ip addr add 10.20.0.$((99+i))/24 dev e2e-c 2>/dev/null; done
+  # Each client knocks in order; the clients run concurrently so all of them
+  # are armed well inside fallback_ttl.
+  KPIDS=()
+  for i in $(seq 1 $MANY); do python3 "$DRIVER" knock "10.20.0.$((99+i))" "$SERVER" 0.05 "$SEQ" "$PORT" & KPIDS+=($!); done
+  wait "${KPIDS[@]}"
+  sleep 1
+  allowed() { sudo ip netns exec "$NS" nft list set inet "sourceknock_$SERVICE" allowed_v4 | grep -oE '10\.20\.0\.1[0-9][0-9]' | sort -u | wc -l | tr -d ' '; }
+  n="$(allowed)"; if [ "$n" = "$MANY" ]; then check "all $MANY clients armed ($n)" 1 1; else check "all $MANY clients armed ($n)" 1 0; fi
+  LAST=10.20.0.$((99+MANY))
+  if python3 "$DRIVER" probe "$SERVER" "$PORT" 1.0 "$LAST"; then check "client #$MANY can connect" 1 1; else check "client #$MANY can connect" 1 0; fi
+  sleep $((FALLBACK+1))
+  n="$(allowed)"; if [ "$n" = "0" ]; then check "every armed element expired ($n left)" 1 1; else check "every armed element expired ($n left)" 1 0; fi
+  for i in $(seq 1 $MANY); do sudo ip addr del 10.20.0.$((99+i))/24 dev e2e-c 2>/dev/null; done
 else
   # Open a session right after the knock and keep it busy past the TTL: the
   # element expiring must only stop NEW connections.
@@ -162,6 +201,15 @@ else
   echo "--- probe AFTER ttl (expect closed) ---"
   if probe; then check "post-ttl closed" 0 1; else check "post-ttl closed" 0 0; fi
   if wait $HOLD; then check "session survives ttl expiry" 1 1; else check "session survives ttl expiry" 1 0; cat "$WORK/hold.log"; fi
+
+  # A re-knock while the port is still open must restart the TTL, not leave
+  # the original expiry in place.
+  echo "--- knock, re-knock near expiry (expect the TTL to restart) ---"
+  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  sleep $((DURATION-1))
+  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  sleep 2
+  if probe; then check "re-knock restarts the ttl" 1 1; else check "re-knock restarts the ttl" 1 0; fi
 fi
 
 echo
