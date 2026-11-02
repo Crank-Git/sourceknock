@@ -1,7 +1,9 @@
 /* capture.c - AF_PACKET raw socket capture (Linux). */
+/* Must precede every include, or it does not apply to the system headers the
+ * local header pulls in. */
+#define _POSIX_C_SOURCE 200809L
 #include "capture.h"
 
-#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +13,7 @@
 #include <net/if.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
@@ -76,6 +79,17 @@ int capture_open(capture_t *cap, const char *iface, kn_packet_fn fn, void *arg)
         return -1;
     }
 
+    /* Wake up at least once a second even on a silent interface, so a stop
+     * request that lands between packets is never stuck behind a blocking
+     * recvfrom(). */
+    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+    {
+        fprintf(stderr, "capture: SO_RCVTIMEO: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
     cap->fd = fd;
     fprintf(stderr, "capture: listening on '%s' (ifindex %d)\n", iface,
             ifr.ifr_ifindex);
@@ -97,7 +111,7 @@ int capture_run(capture_t *cap)
     for (int i = 0; i < DEDUP_SIZE; i++)
         dts[i] = -1e9;
 
-    while (1)
+    while (!(cap->stop && *cap->stop))
     {
         struct sockaddr_ll sll;
         socklen_t sll_len = sizeof(sll);
@@ -105,12 +119,11 @@ int capture_run(capture_t *cap)
                              (struct sockaddr *)&sll, &sll_len);
         if (n < 0)
         {
-            if (errno == EINTR)
-            {
-                if (cap->stop && *cap->stop)
-                    return 0; /* clean shutdown requested */
+            /* EINTR: a signal (the loop condition checks for a stop
+             * request). EAGAIN: the 1s receive timeout on a quiet
+             * interface. */
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
-            }
             fprintf(stderr, "capture: recvfrom(): %s\n", strerror(errno));
             return -1;
         }

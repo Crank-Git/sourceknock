@@ -148,6 +148,7 @@ wait_file "$WORK/pre_up" || echo "pre-start hold never connected"
 start_daemon() {
   : > "$LOG"
   sudo ip netns exec "$NS" setsid "$BIN" "$CONF" >"$LOG" 2>&1 </dev/null &
+  DAEMON_PID=$!
   for _ in $(seq 1 50); do grep -q "listening for knocks" "$LOG" 2>/dev/null && return 0; sleep 0.1; done
   return 1
 }
@@ -255,6 +256,32 @@ else
   sleep 2
   if probe; then check "re-knock restarts the ttl" 1 1; else check "re-knock restarts the ttl" 1 0; fi
 fi
+
+# Log timestamps are wall-clock time (not time since boot).
+echo "--- log timestamps ---"
+first_ts="$(grep -oE '^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\]' "$LOG" | head -1 | tr -d '[]')"
+to_secs() { IFS=: read -r h m s <<<"$1"; echo $((10#$h*3600 + 10#$m*60 + 10#$s)); }
+if [ -n "$first_ts" ]; then
+  d=$(( ( $(to_secs "$(date +%H:%M:%S)") - $(to_secs "$first_ts") + 86400 ) % 86400 ))
+  if [ "$d" -le 300 ]; then check "log time is wall clock ($first_ts)" 1 1; else check "log time is wall clock ($first_ts, ${d}s off)" 1 0; fi
+else
+  check "log has timestamps" 1 0
+fi
+
+# SIGTERM on an idle interface: the daemon must exit promptly and cleanly
+# (exit 0) and flush its allowed sets on the way out.
+echo "--- SIGTERM on an idle interface ---"
+python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+sleep 2 # nothing else reaches the capture interface after this
+t0=$(date +%s%N)
+sudo pkill -TERM -x sourceknock
+wait "$DAEMON_PID"; rc=$?
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+if [ "$rc" -eq 0 ]; then check "SIGTERM exits 0" 1 1; else check "SIGTERM exits 0 (got $rc)" 1 0; fi
+if [ "$ms" -le 1500 ]; then check "SIGTERM exits within 1.5s (${ms}ms)" 1 1; else check "SIGTERM exits within 1.5s (${ms}ms)" 1 0; fi
+grep -q "sourceknock stopped" "$LOG" && check "clean shutdown logged" 1 1 || check "clean shutdown logged" 1 0
+left="$(sudo ip netns exec "$NS" nft list set inet "sourceknock_$SERVICE" allowed_v4 2>/dev/null | grep -c "$CLIENT")"
+if [ "$left" = "0" ]; then check "allowed set flushed on shutdown" 1 1; else check "allowed set flushed on shutdown" 1 0; fi
 
 echo
 echo "RESULT: $pass passed, $fail failed"
