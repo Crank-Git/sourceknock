@@ -1,4 +1,4 @@
-.TH SOURCEKNOCK 1 "2026-10-25" "sourceknock 1.0" "sourceknock"
+.TH SOURCEKNOCK 1 "2026-11-02" "sourceknock 1.1" "sourceknock"
 .SH NAME
 sourceknock \- source-port port-knocking daemon
 .SH SYNOPSIS
@@ -176,6 +176,10 @@ Default configuration file.
 Installed daemon binary (see
 .BR make install ).
 .TP
+.BI /usr/local/bin/sourceknock-knock
+Installed knock client; see
+.BR sourceknock-knock (1).
+.TP
 .BI /etc/systemd/system/sourceknock.service
 Default systemd unit.
 .TP
@@ -199,8 +203,11 @@ and the Troubleshooting section of the README.
 The daemon ran until signalled.
 .IP \(bu 2
 .B 1
-Configuration error, reward/state-machine setup failure, or capture open
-failure (usually missing privileges).
+Configuration error, an interface whose link type can't be parsed, nftables
+could not be programmed (missing nft or
+.BR CAP_NET_ADMIN ),
+or capture open failure (usually missing privileges). Any tables already
+programmed are removed again, so a failed start leaves the host as it was.
 .RE
 .SH SEE ALSO
 .BR systemctl (8),

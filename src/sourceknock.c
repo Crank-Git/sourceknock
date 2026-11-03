@@ -300,7 +300,8 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
 
 int main(int argc, char **argv)
 {
-    const char *path = (argc > 1) ? argv[1] : "/etc/sourceknock.conf";
+    const char *path =
+        (argc > 1) ? argv[1] : "/etc/sourceknock/sourceknock.conf";
 
     char err[256];
     if (config_parse_file(path, err, sizeof(err)) != 0)
