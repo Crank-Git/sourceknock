@@ -150,17 +150,13 @@ Open SSH (port 22) for 30 seconds after a knock:
 .IP
 .BR "sudo sourceknock /etc/sourceknock/sourceknock.conf" ""
 .PP
-Knock from a client by sending each probe with the right SOURCE port (7000,
-8000, 9000) toward the fixed service port — the destination port is
-irrelevant — then connect:
+Knock from a client with
+.BR sourceknock-knock (1),
+which sends each step from the right SOURCE port, in order, then connect:
 .IP
 .nf
-# hping3 -D sets the SOURCE port; the knock lives there, not the dest port
-for p in 7000 8000 9000; do
-    hping3 -D $p --udp -i u1000 server </dev/null 2>/dev/null &
-done
-wait
-ssh -p 22 user@server
+sourceknock-knock server 7000,8000,9000
+ssh user@server
 .fi
 .PP
 Run under systemd (installs the binary and units, then reloads systemd):
@@ -209,7 +205,7 @@ failure (usually missing privileges).
 .SH SEE ALSO
 .BR systemctl (8),
 .BR nft (8),
-.BR hping3 (8)
+.BR sourceknock-knock (1)
 .PP
 Project documentation and contributor guide:
 .B https://github.com/Crank-Git/sourceknock#readme

@@ -47,6 +47,7 @@ TCP sport=<ephemeral> -> dst=X:22  ->   port 22 now reachable for this IP
 | `src/capture.c` | `AF_PACKET` raw-socket capture (Linux) with frame de-duplication |
 | `src/reward.c`  | nftables management: open/close the service port for a client IP |
 | `src/sourceknock.c` | Daemon: wires capture -> state machine -> reward |
+| `src/knock.c`   | `sourceknock-knock`, the client that sends a knock (Linux/macOS) |
 | `tests/`        | Unit tests (run on any OS) |
 
 The core (state machine, packet parsing, config) is deliberately free of socket
@@ -57,6 +58,7 @@ live in `capture.c` / `reward.c`.
 
 ```sh
 make test      # build + run unit tests (any OS with a C compiler)
+make client    # build the sourceknock-knock client (Linux, macOS)
 make daemon    # build the sourceknock daemon (Linux only; needs kernel headers)
 ```
 
@@ -166,6 +168,41 @@ closed port sends, so a scan still sees nothing.
   knock **all** listed ports are opened for the client (each port gets its own
   nftables accept/drop rule, sharing one per-family "allowed" set). Ports must
   be in 1..65535.
+
+## Knocking
+
+Use the bundled client, `sourceknock-knock` (`make client`, installed by
+`make install`; builds on Linux and macOS). It sends one UDP datagram per
+sequence port, each from that **source** port, in order, then exits:
+
+```sh
+sourceknock-knock server.example.com 7000,8000,9000
+ssh user@server.example.com
+```
+
+Options: `-p PORT` destination port (the trigger's `knock_port`, if it sets
+one; default 9), `-d MS` delay between steps (default 50), `-s ADDR` local
+address, `-4`/`-6`. Source ports below 1024 need root on Linux. See
+`man sourceknock-knock`.
+
+### NAT
+
+The knock lives in the source port, so anything that rewrites source ports
+breaks it. Most home routers keep the client's source port when it is free;
+carrier-grade NAT (common on mobile networks) and some corporate firewalls
+pick their own, and then no knock can arrive intact. To check a network, knock
+a host where you can watch the traffic and compare the source ports that
+arrive with the ones you sent:
+
+```sh
+# on the server (or any host you control)
+sudo tcpdump -ni eth0 udp and dst port 9
+# from the client
+sourceknock-knock server.example.com 7000,8000,9000
+```
+
+If the ports in the capture are not 7000, 8000, 9000, that network rewrites
+them; knock from elsewhere (or over a VPN that preserves ports).
 
 ## Running
 

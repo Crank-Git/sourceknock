@@ -1,6 +1,7 @@
 # sourceknock - Makefile
 #
-#   make            build the daemon (Linux) + all tests
+#   make            build + run the unit tests and build the knock client
+#   make client     build the sourceknock-knock client (Linux/macOS)
 #   make test       build and run the cross-platform unit tests (macOS/Linux)
 #   make test-asan  the unit tests under ASan + LSan + UBSan (leaks need Linux)
 #   make daemon     build the sourceknock daemon (requires Linux headers)
@@ -43,6 +44,9 @@ DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
 TESTS := state_test packet_test config_test close_test
 
+# The knock client is plain POSIX, so it builds anywhere.
+CLIENT := sourceknock-knock
+
 # ---- install (Linux only: ships the systemd units) ----
 # Paths are overridable, e.g. `make install PREFIX=/usr BINDIR=/usr/bin`.
 # DESTDIR supports packaging/rubber-stamping (no files touch the live tree).
@@ -64,9 +68,13 @@ FUZZ_CXXFLAGS := -O2 -g -std=c++14 -fsanitize=fuzzer,address -Isrc
 # libFuzzer is a clang feature; gcc lacks the runtime.
 FUZZ_CC ?= clang
 
-.PHONY: all test test-asan daemon fuzz fuzz-build fuzz-seeds clean format check-format tidy install uninstall
+.PHONY: all test test-asan client daemon fuzz fuzz-build fuzz-seeds clean format check-format tidy install uninstall
 
 all: test
+
+client: $(CLIENT)
+$(CLIENT): src/knock.o
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # ---- code quality (clang-format + clang-tidy) ----
 # Requires a real clang-format / clang-tidy (apt install clang, or
@@ -93,9 +101,10 @@ tidy:
 	clang-tidy $(DAEMON_SRC) -- -Isrc -std=gnu11
 
 # ---- unit tests (pure core, runs anywhere with a C compiler) ----
-test: $(TESTS)
+test: $(TESTS) $(CLIENT)
 	@echo "=== running test suites ==="
 	@rc=0; for t in $(TESTS); do ./$$t || rc=1; done; \
+	 python3 tests/knock_client_test.py ./$(CLIENT) || rc=1; \
 	 if [ $$rc -eq 0 ]; then echo "ALL GREEN"; else echo "FAILURES ABOVE"; fi; \
 	 exit $$rc
 
@@ -157,13 +166,14 @@ sourceknock: $(DAEMON_OBJ)
 # exist before the service is started (see the README). Enable with:
 #   systemctl enable --now sourceknock        # default config
 #   systemctl enable --now sourceknock@myconf # per-instance (template)
-install: daemon
+install: daemon client
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
 	install -m 0755 sourceknock $(DESTDIR)$(BINDIR)/sourceknock
+	install -m 0755 $(CLIENT) $(DESTDIR)$(BINDIR)/$(CLIENT)
 	# The man page ships alongside the systemd units, so it is installed by the
 	# same Linux-only 'install' target (see the comment above).
 	install -d -m 0755 $(DESTDIR)$(MANDIR)/man1
-	install -m 0644 man/sourceknock.1 $(DESTDIR)$(MANDIR)/man1/
+	install -m 0644 man/sourceknock.1 man/sourceknock-knock.1 $(DESTDIR)$(MANDIR)/man1/
 	install -d -m 0755 $(DESTDIR)$(SYSDIR)
 	install -m 0644 $(UNIT_DIR)/sourceknock.service $(DESTDIR)$(SYSDIR)/
 	install -m 0644 $(UNIT_DIR)/sourceknock@.service $(DESTDIR)$(SYSDIR)/
@@ -183,7 +193,8 @@ uninstall:
 	fi
 	rm -f $(DESTDIR)$(SYSDIR)/sourceknock.service
 	rm -f $(DESTDIR)$(SYSDIR)/sourceknock@.service
-	rm -f $(DESTDIR)$(BINDIR)/sourceknock
+	rm -f $(DESTDIR)$(BINDIR)/sourceknock $(DESTDIR)$(BINDIR)/$(CLIENT)
+	rm -f $(DESTDIR)$(MANDIR)/man1/sourceknock.1 $(DESTDIR)$(MANDIR)/man1/sourceknock-knock.1
 
 clean:
-	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock tests/*.o $(FUZZ_BIN) $(FUZZ_DIR)/*.o
+	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock $(CLIENT) src/knock.o tests/*.o $(FUZZ_BIN) $(FUZZ_DIR)/*.o
