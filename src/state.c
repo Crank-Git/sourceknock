@@ -226,9 +226,18 @@ kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip, uint16_t sport,
 
     kn_client_t *c = &ctx->slots[i];
 
-    /* Currently knocking: strict ordering, no tolerance. */
     if (sport != ctx->seq.ports[c->index])
     {
+        /* A repeat of a step already matched is a retransmission (a TCP
+         * client's kernel resends each SYN every second or so, and those land
+         * after later steps), not a wrong knock: ignore it. The expected
+         * port is checked first, so sequences that reuse a port still
+         * advance. */
+        for (size_t k = 0; k < c->index; k++)
+            if (sport == ctx->seq.ports[k])
+                return KNOCK_IGNORE;
+
+        /* Any other port: strict ordering, start over. */
         remove_slot(ctx, i);
         return KNOCK_RESET;
     }

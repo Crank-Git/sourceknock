@@ -381,6 +381,9 @@ static kn_result_t ref_feed(ref_client_t *c, const uint16_t *seq, size_t len,
     }
     if (sport != seq[c->index])
     {
+        for (size_t k = 0; k < c->index; k++)
+            if (sport == seq[k])
+                return KNOCK_IGNORE;
         c->index = 0;
         return KNOCK_RESET;
     }
@@ -423,6 +426,64 @@ static void test_differential_vs_reference(void)
     kn_free(ctx);
 }
 
+/* ---- issue #36: a retransmitted knock doesn't reset progress ---- */
+static void test_retransmit_ignored(void)
+{
+    uint16_t ports[] = {7000, 8000, 9000};
+    knock_sequence_t seq = {ports, 3};
+    kn_ctx_t *ctx = kn_create(&seq, 10.0);
+    kn_set_complete(ctx, count_trigger, NULL);
+    n_trig = 0;
+    struct in_addr a = ip(10, 0, 0, 1);
+
+    /* TCP connect() knock: each SYN is resent ~1s later */
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 7000, 0.0), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 7000, 1.0), KNOCK_IGNORE);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 8000, 1.2), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 8000, 2.2), KNOCK_IGNORE);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 8000, 2.3), KNOCK_IGNORE);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 9000, 2.4), KNOCK_TRIGGER);
+    CHECK_EQ_INT(n_trig, 1);
+
+    /* retransmits of OLDER steps land after later ones (kernels resend
+     * SYNs every ~1s): also ignored */
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 7000, 5.0), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 7000, 6.0), KNOCK_IGNORE);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 8000, 6.3), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 7000, 7.0), KNOCK_IGNORE);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 8000, 7.3), KNOCK_IGNORE);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 9000, 7.6), KNOCK_TRIGGER);
+    CHECK_EQ_INT(n_trig, 2);
+
+    /* any port that is not a step already matched still resets */
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 7000, 10.0), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 9000, 10.1), KNOCK_RESET);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 7000, 11.0), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(ctx, AF_INET, &a, 1234, 11.1), KNOCK_RESET);
+    CHECK_EQ_INT(n_trig, 2);
+
+    /* a sequence that reuses a port still advances: the expected port is
+     * matched before the retransmit check */
+    uint16_t p3[] = {7000, 7000, 8000};
+    knock_sequence_t s3 = {p3, 3};
+    kn_ctx_t *c3 = kn_create(&s3, 10.0);
+    CHECK_EQ_INT(kn_feed(c3, AF_INET, &a, 7000, 0.0), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(c3, AF_INET, &a, 7000, 0.1), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(c3, AF_INET, &a, 7000, 0.2), KNOCK_IGNORE);
+    CHECK_EQ_INT(kn_feed(c3, AF_INET, &a, 8000, 0.3), KNOCK_TRIGGER);
+    kn_free(c3);
+
+    /* a non-adjacent repeat in the sequence itself still works */
+    uint16_t p2[] = {7000, 8000, 7000};
+    knock_sequence_t s2 = {p2, 3};
+    kn_ctx_t *c2 = kn_create(&s2, 10.0);
+    CHECK_EQ_INT(kn_feed(c2, AF_INET, &a, 7000, 0.0), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(c2, AF_INET, &a, 8000, 0.1), KNOCK_PROGRESS);
+    CHECK_EQ_INT(kn_feed(c2, AF_INET, &a, 7000, 0.2), KNOCK_TRIGGER);
+    kn_free(c2);
+    kn_free(ctx);
+}
+
 int main(void)
 {
     printf("== state machine tests ==\n");
@@ -441,5 +502,6 @@ int main(void)
     TEST_RUN(test_interleaved_removal);
     TEST_RUN(test_single_port_sequence);
     TEST_RUN(test_differential_vs_reference);
+    TEST_RUN(test_retransmit_ignored);
     TEST_SUMMARY();
 }
