@@ -6,6 +6,7 @@
 /packet_test
 /config_test
 /close_test
+/sourceknock-knock
 /tests/*.o
 # instrumented / debug builds
 *_asan

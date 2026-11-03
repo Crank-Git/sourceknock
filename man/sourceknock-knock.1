@@ -1,0 +1,89 @@
+.TH SOURCEKNOCK-KNOCK 1 "2026-11-02" "sourceknock 1.0" "sourceknock"
+.SH NAME
+sourceknock-knock \- send a source-port knock to a sourceknock server
+.SH SYNOPSIS
+.B sourceknock-knock
+.RB [ \-p
+.IR port ]
+.RB [ \-d
+.IR ms ]
+.RB [ \-s
+.IR addr ]
+.RB [ \-4 | \-6 ]
+.I host
+.I sequence
+.SH DESCRIPTION
+.B sourceknock-knock
+sends one UDP datagram per port in
+.IR sequence ,
+in order, each bound to that port as its
+.B source
+port, to
+.IR host .
+The
+.BR sourceknock (1)
+daemon reads the knock from the source ports. The destination port only
+matters if the trigger sets
+.BR knock_port ;
+pass it with
+.BR \-p .
+.PP
+Each datagram is sent from its own socket, so the knock steps leave in the
+order given, with
+.I ms
+milliseconds between them.
+.SH OPTIONS
+.TP
+.BI \-p " port"
+Destination port (default 9). Use the trigger's
+.B knock_port
+if it sets one.
+.TP
+.BI \-d " ms"
+Delay between knock steps in milliseconds (default 50). Keep the whole knock
+inside the trigger's
+.BR window .
+.TP
+.BI \-s " addr"
+Local address to send from (default: any).
+.TP
+.BR \-4 ", " \-6
+Use IPv4 or IPv6 only.
+.TP
+.B \-h
+Show usage.
+.SH EXAMPLES
+Knock 7000, 8000, 9000, then connect:
+.IP
+.nf
+sourceknock-knock server.example.com 7000,8000,9000
+ssh user@server.example.com
+.fi
+.PP
+A trigger with
+.B knock_port = 4444
+over IPv6:
+.IP
+.nf
+sourceknock-knock -6 -p 4444 server.example.com 7000,8000,9000
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+All datagrams were sent.
+.TP
+.B 1
+Name resolution, bind or send failed (for example the source port is in use,
+or is below 1024 and you are not root).
+.TP
+.B 2
+Invalid arguments.
+.SH NOTES
+NAT can rewrite source ports. Home routers usually keep them; carrier-grade
+and mobile NAT usually do not, and then no knock can arrive intact. See the
+README's "NAT" section for how to check.
+.SH SEE ALSO
+.BR sourceknock (1)
+.SH AUTHOR
+Written and maintained by Crank-Git.
+Released under the MIT License.

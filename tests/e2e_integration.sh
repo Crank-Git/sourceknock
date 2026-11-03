@@ -24,6 +24,7 @@ SERVER=10.20.0.2      # inside the netns (runs the daemon + listener)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="$(cd "$HERE/.." && pwd)/sourceknock"
 DRIVER="$HERE/driver.py"
+KNOCK="$(cd "$HERE/.." && pwd)/sourceknock-knock"
 LISTENER="$HERE/listener.py"
 # Work in a private temp dir so the test is hermetic: it must run with no
 # pre-existing scratch dir (e.g. on CI's ubuntu runner). WORK is removed by
@@ -76,6 +77,7 @@ cleanup() {
 trap cleanup EXIT
 
 [ -x "$BIN" ] || { echo "FAIL daemon not built at $BIN (run 'make daemon')"; exit 1; }
+[ -x "$KNOCK" ] || { echo "FAIL knock client not built at $KNOCK (run 'make client')"; exit 1; }
 
 sudo ip netns del "$NS" 2>/dev/null
 sudo ip netns add "$NS"
@@ -179,7 +181,7 @@ expect_flags "NULL scan dropped" "$PORT" NULL none
 expect_flags "ACK scan same as an unused port" "$PORT" ACK "$ACK_UNUSED"
 
 echo "--- sending knock $SEQ ---"
-python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+"$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
 sleep 0.5
 
 echo "--- probe AFTER knock (expect open) ---"
@@ -195,7 +197,7 @@ if [ "$MODE" = "close_on_connect" ]; then
   # Closing the port must only stop NEW connections: a session opened by the
   # knock keeps exchanging data after the port closes behind it.
   echo "--- knock again, hold a session open past the close (expect it to survive) ---"
-  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
   sleep 0.5
   python3 "$DRIVER" hold "$SERVER" "$PORT" 3 >"$WORK/hold.log" 2>&1 &
   HOLD=$!
@@ -206,13 +208,13 @@ if [ "$MODE" = "close_on_connect" ]; then
   # fallback_ttl must be enforced by the kernel, not by the daemon noticing a
   # later packet: knock, then send NOTHING to the server until it has passed.
   echo "--- knock, stay silent for fallback_ttl=${FALLBACK}s (expect closed) ---"
-  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
   sleep $((FALLBACK+1))
   if probe; then check "fallback_ttl closes on a quiet interface" 0 1; else check "fallback_ttl closes on a quiet interface" 0 0; fi
 
   # ...and must still hold if the daemon dies right after arming the port.
   echo "--- knock, SIGKILL the daemon, wait fallback_ttl (expect closed) ---"
-  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
   sleep 0.5
   sudo pkill -9 -x sourceknock
   sleep $((FALLBACK+1))
@@ -227,7 +229,7 @@ if [ "$MODE" = "close_on_connect" ]; then
   # Each client knocks in order; the clients run concurrently so all of them
   # are armed well inside fallback_ttl.
   KPIDS=()
-  for i in $(seq 1 $MANY); do python3 "$DRIVER" knock "10.20.0.$((99+i))" "$SERVER" 0.05 "$SEQ" "$PORT" & KPIDS+=($!); done
+  for i in $(seq 1 $MANY); do "$KNOCK" -s "10.20.0.$((99+i))" -d 50 -p "$PORT" "$SERVER" "$SEQ" & KPIDS+=($!); done
   wait "${KPIDS[@]}"
   sleep 1
   allowed() { sudo ip netns exec "$NS" nft list set inet "sourceknock_$SERVICE" allowed_v4 | grep -oE '10\.20\.0\.1[0-9][0-9]' | sort -u | wc -l | tr -d ' '; }
@@ -253,7 +255,7 @@ else
   echo "--- knock with a late repeat of an earlier step ---"
   sleep $((DURATION+1)) # let the previous element expire
   IFS=, read -ra SP3 <<<"$SEQ"
-  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "${SP3[0]},${SP3[1]},${SP3[0]},${SP3[2]}" "$PORT"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "${SP3[0]},${SP3[1]},${SP3[0]},${SP3[2]}"
   sleep 0.3
   if probe; then check "late repeat of an earlier step is ignored" 1 1; else check "late repeat of an earlier step is ignored" 1 0; fi
 
@@ -270,9 +272,9 @@ else
   # A re-knock while the port is still open must restart the TTL, not leave
   # the original expiry in place.
   echo "--- knock, re-knock near expiry (expect the TTL to restart) ---"
-  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
   sleep $((DURATION-1))
-  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
   sleep 2
   if probe; then check "re-knock restarts the ttl" 1 1; else check "re-knock restarts the ttl" 1 0; fi
 fi
@@ -300,7 +302,7 @@ printf '[global]\ninterface = lo\n[trigger:loe2e]\nport = %s\nsequence = %s\nwin
 sudo ip netns exec "$NS" setsid "$BIN" "$WORK/lo.conf" >"$WORK/lo.log" 2>&1 </dev/null &
 LO_PID=$!
 for _ in $(seq 1 50); do grep -q "listening for knocks" "$WORK/lo.log" && break; sleep 0.1; done
-sudo ip netns exec "$NS" python3 "$DRIVER" knock 127.0.0.1 127.0.0.1 0.05 "$SEQ" "$LO_PORT"
+sudo ip netns exec "$NS" "$KNOCK" -s 127.0.0.1 -d 50 -p "$LO_PORT" 127.0.0.1 "$SEQ"
 sleep 0.5
 oks="$(grep -c "knock OK" "$WORK/lo.log")"; resets="$(grep -c "progress reset" "$WORK/lo.log")"
 if [ "$oks" = "1" ] && [ "$resets" = "0" ]; then check "loopback knock counted once (ok=$oks reset=$resets)" 1 1; else check "loopback knock counted once (ok=$oks reset=$resets)" 1 0; cat "$WORK/lo.log"; fi
@@ -322,7 +324,7 @@ sudo ip netns exec "$NS" setsid "$BIN" "$WORK/tun.conf" >"$WORK/tun.log" 2>&1 </
 TUN_PID=$!
 for _ in $(seq 1 50); do grep -q "listening for knocks" "$WORK/tun.log" && break; sleep 0.1; done
 grep -q "link ipip tunnel" "$WORK/tun.log" && check "tunnel link type detected" 1 1 || { check "tunnel link type detected" 1 0; cat "$WORK/tun.log"; }
-python3 "$DRIVER" knock 10.30.0.1 10.30.0.2 0.05 "$SEQ" "$TUN_PORT"
+"$KNOCK" -s 10.30.0.1 -d 50 -p "$TUN_PORT" 10.30.0.2 "$SEQ"
 sleep 0.5
 if sudo ip netns exec "$NS" nft list set inet sourceknock_tune2e allowed_v4 2>/dev/null | grep -q 10.30.0.1; then
   check "knock over ipip tunnel opens" 1 1
@@ -396,7 +398,7 @@ fi
 # SIGTERM on an idle interface: the daemon must exit promptly and cleanly
 # (exit 0) and flush its allowed sets on the way out.
 echo "--- SIGTERM on an idle interface ---"
-python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
+"$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
 sleep 2 # nothing else reaches the capture interface after this
 t0=$(date +%s%N)
 sudo pkill -TERM -x sourceknock

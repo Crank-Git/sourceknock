@@ -32,9 +32,9 @@ jobs:
 
       # The daemon layer (AF_PACKET / nftables) is Linux-only, so only build
       # it where the Linux kernel headers are available.
-      - name: Build daemon (Linux)
+      - name: Build daemon + knock client (Linux)
         if: runner.os == 'Linux'
-        run: make daemon
+        run: make daemon client
 
       - name: Verify daemon binary
         if: runner.os == 'Linux'

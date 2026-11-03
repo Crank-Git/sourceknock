@@ -39,7 +39,10 @@ make test       # build + run the cross-platform unit tests
 ```
 
 This runs `state_test`, `packet_test`, `config_test`, and `close_test` against
-the pure core (no socket code), so it works on any OS with a C compiler.
+the pure core (no socket code), so it works on any OS with a C compiler. It
+also builds the `sourceknock-knock` client and runs
+`tests/knock_client_test.py`, which sends real knocks to local UDP receivers
+and checks the source ports, order and error handling (needs `python3`).
 
 ```sh
 make test-asan  # the same suites under ASan + LeakSanitizer + UBSan
