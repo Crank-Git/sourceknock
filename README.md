@@ -215,8 +215,12 @@ are not decoded.
 
 - Linux only (`AF_PACKET`, nftables).
 - nftables set syntax targets modern `nft` (validated on 1.0.9).
-- De-duplication drops near-identical frames within a 0.5s window, which
-  handles loopback/interfaces that deliver each frame twice.
+- Only frames the host *receives* count toward a knock; frames it sends
+  (including loopback's second copy of every frame) are ignored.
+- A repeat of a knock step that was already matched is ignored rather than
+  resetting the knock, so clients whose knock packets get retransmitted (e.g.
+  knocking with TCP `connect()`, whose SYNs are resent every ~1s) still work.
+  Any other port mid-sequence resets it.
 - Source ports are spoofable — this is obfuscation, not authentication.
 
 ## Troubleshooting

@@ -5,6 +5,12 @@
       Send one UDP datagram per source port (bound to that source port) so the
       daemon reads the knock sequence from the clients' source ports.
 
+  knock-tcp <client_ip> <server_ip> <delay_s> <sport1,sport2,...> <dest_port>
+      Knock with TCP connect() attempts instead of UDP: one non-blocking
+      connect per source port, left pending so the kernel retransmits the SYN
+      (~1s later) while the next step is sent. Models a client that knocks by
+      connecting, where retransmits land mid-sequence.
+
   probe <server_ip> <port> <timeout_s> [source_ip]
       Attempt a TCP connect (optionally from source_ip); exit 0 if the port is
       reachable, 1 otherwise.
@@ -40,6 +46,24 @@ def knock(client_ip, server_ip, delay, ports, dest_port=2222):
             s.close()
         if delay:
             time.sleep(delay)
+
+
+def knock_tcp(client_ip, server_ip, delay, ports, dest_port):
+    pending = []
+    for p in ports:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((client_ip, p))
+        s.setblocking(False)
+        s.connect_ex((server_ip, dest_port))
+        pending.append(s)
+        if p != ports[-1]:
+            time.sleep(delay)
+    # Close right after the last step so no LATER retransmit can complete the
+    # sequence by chance; only the mid-sequence retransmits are in play.
+    time.sleep(0.2)
+    for s in pending:
+        s.close()
 
 
 def probe(server_ip, port, timeout, source_ip=None):
@@ -138,6 +162,10 @@ def main(argv):
         _, _, client, server, delay, ports, *rest = argv
         dest = int(rest[0]) if rest else 2222
         knock(client, server, float(delay), [int(x) for x in ports.split(",")], dest)
+        return 0
+    if argv[1] == "knock-tcp":
+        _, _, client, server, delay, ports, dest = argv
+        knock_tcp(client, server, float(delay), [int(x) for x in ports.split(",")], int(dest))
         return 0
     if argv[1] == "probe":
         _, _, server, port, timeout, *rest = argv

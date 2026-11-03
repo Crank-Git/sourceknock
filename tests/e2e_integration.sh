@@ -247,6 +247,25 @@ else
   if probe; then check "post-ttl closed" 0 1; else check "post-ttl closed" 0 0; fi
   if wait $HOLD; then check "session survives ttl expiry" 1 1; else check "session survives ttl expiry" 1 0; cat "$WORK/hold.log"; fi
 
+  # Deterministic version: a repeat of an earlier step lands after a later
+  # one (A, B, A, C). It must be ignored, not reset the knock.
+  echo "--- knock with a late repeat of an earlier step ---"
+  sleep $((DURATION+1)) # let the previous element expire
+  IFS=, read -ra SP3 <<<"$SEQ"
+  python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "${SP3[0]},${SP3[1]},${SP3[0]},${SP3[2]}" "$PORT"
+  sleep 0.3
+  if probe; then check "late repeat of an earlier step is ignored" 1 1; else check "late repeat of an earlier step is ignored" 1 0; fi
+
+  # Knock with TCP connects whose SYNs are dropped (the port is closed), so
+  # the kernel retransmits each SYN ~1s later, after the knock has moved on.
+  # A retransmitted step must not reset progress.
+  echo "--- knock with retransmitting TCP connects ---"
+  sleep $((DURATION+1)) # let the previous element expire
+  if probe; then check "closed before tcp knock" 0 1; else check "closed before tcp knock" 0 0; fi
+  python3 "$DRIVER" knock-tcp "$CLIENT" "$SERVER" 1.3 "$SEQ" "$PORT"
+  sleep 0.3
+  if probe; then check "tcp connect knock opens despite SYN retransmits" 1 1; else check "tcp connect knock opens despite SYN retransmits" 1 0; grep -E "reset|knock" "$LOG" | tail -5; fi
+
   # A re-knock while the port is still open must restart the TTL, not leave
   # the original expiry in place.
   echo "--- knock, re-knock near expiry (expect the TTL to restart) ---"
@@ -256,6 +275,36 @@ else
   sleep 2
   if probe; then check "re-knock restarts the ttl" 1 1; else check "re-knock restarts the ttl" 1 0; fi
 fi
+
+# The server's OWN frames never count: sending from the knock source ports
+# (outgoing, src = the server) must not open the port for the server.
+echo "--- server sends from the knock ports (expect no knock) ---"
+IFS=, read -ra SEQ_PORTS <<<"$SEQ"
+for p in "${SEQ_PORTS[@]}"; do
+  sudo ip netns exec "$NS" python3 -c "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('$SERVER',$p)); s.sendto(b'x',('$CLIENT',9))"
+  sleep 0.05
+done
+sleep 0.5
+if sudo ip netns exec "$NS" nft list set inet "sourceknock_$SERVICE" allowed_v4 | grep -q "$SERVER"; then
+  check "server's own outgoing frames are not a knock" 1 0
+else
+  check "server's own outgoing frames are not a knock" 1 1
+fi
+
+# Loopback delivers every frame twice to AF_PACKET (once outgoing, once
+# incoming). A knock over lo must be seen exactly once.
+echo "--- knock over loopback (each frame counted once) ---"
+LO_PORT=$((PORT+7))
+printf '[global]\ninterface = lo\n[trigger:loe2e]\nport = %s\nsequence = %s\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$LO_PORT" "$SEQ" > "$WORK/lo.conf"
+sudo ip netns exec "$NS" setsid "$BIN" "$WORK/lo.conf" >"$WORK/lo.log" 2>&1 </dev/null &
+LO_PID=$!
+for _ in $(seq 1 50); do grep -q "listening for knocks" "$WORK/lo.log" && break; sleep 0.1; done
+sudo ip netns exec "$NS" python3 "$DRIVER" knock 127.0.0.1 127.0.0.1 0.05 "$SEQ" "$LO_PORT"
+sleep 0.5
+oks="$(grep -c "knock OK" "$WORK/lo.log")"; resets="$(grep -c "progress reset" "$WORK/lo.log")"
+if [ "$oks" = "1" ] && [ "$resets" = "0" ]; then check "loopback knock counted once (ok=$oks reset=$resets)" 1 1; else check "loopback knock counted once (ok=$oks reset=$resets)" 1 0; cat "$WORK/lo.log"; fi
+if sudo ip netns exec "$NS" nft list set inet sourceknock_loe2e allowed_v4 | grep -q 127.0.0.1; then check "loopback knock opens" 1 1; else check "loopback knock opens" 1 0; fi
+sudo kill -TERM "$LO_PID" 2>/dev/null; sudo pkill -TERM -f "$WORK/lo.conf"; wait "$LO_PID" 2>/dev/null
 
 # Log timestamps are wall-clock time (not time since boot).
 echo "--- log timestamps ---"

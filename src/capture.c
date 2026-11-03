@@ -100,17 +100,6 @@ int capture_run(capture_t *cap)
 {
     unsigned char buf[2048];
 
-/* Loopback (and some other) interfaces deliver each frame twice via
- * AF_PACKET. Drop near-duplicate frames seen within the window by
- * fingerprinting frame contents into a small ring buffer. */
-#define DEDUP_SIZE 2048
-#define DEDUP_WINDOW 0.5 /* seconds */
-    uint32_t dph[DEDUP_SIZE];
-    double dts[DEDUP_SIZE];
-    int dslot = 0;
-    for (int i = 0; i < DEDUP_SIZE; i++)
-        dts[i] = -1e9;
-
     while (!(cap->stop && *cap->stop))
     {
         struct sockaddr_ll sll;
@@ -128,33 +117,14 @@ int capture_run(capture_t *cap)
             return -1;
         }
 
-        /* Fingerprint the frame (FNV-1a over up to 128 bytes + length). */
-        uint32_t h = 2166136261u;
-        size_t hn = (size_t)n < 128 ? (size_t)n : 128;
-        for (size_t i = 0; i < hn; i++)
-        {
-            h ^= buf[i];
-            h *= 16777619u;
-        }
-        h ^= (uint32_t)n;
-        h *= 16777619u;
+        /* Only frames this host RECEIVES can be a knock. AF_PACKET also
+         * hands us every frame the host sends (PACKET_OUTGOING), which would
+         * let the server's own traffic drive knock state, and on loopback is
+         * the second copy of every frame. */
+        if (sll.sll_pkttype == PACKET_OUTGOING)
+            continue;
 
         double now = now_ts();
-        int dup = 0;
-        for (int i = 0; i < DEDUP_SIZE; i++)
-        {
-            if (dts[i] > now - DEDUP_WINDOW && dph[i] == h)
-            {
-                dup = 1;
-                break;
-            }
-        }
-        if (dup)
-            continue; /* second copy of a frame we already processed */
-        dph[dslot] = h;
-        dts[dslot] = now;
-        dslot = (dslot + 1) % DEDUP_SIZE;
-
         pkt_info_t info;
         /* sll_hatype is the ARPHRD_ link-layer type; loopback frames carry
          * a 2-byte protocol prefix, Ethernet does not. */
