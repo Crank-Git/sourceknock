@@ -13,7 +13,9 @@ Group=sourceknock
 ExecStart=/usr/local/bin/sourceknock /etc/sourceknock/%i.conf
 
 # AF_PACKET raw sockets need CAP_NET_RAW; running nft rules needs CAP_NET_ADMIN.
-Capabilities=CAP_NET_RAW+eip CAP_NET_ADMIN+eip
+# Ambient capabilities are what a non-root User= actually receives (and what
+# survives exec of the nft child). `Capabilities=` is not a systemd directive.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 NoNewPrivileges=yes
 

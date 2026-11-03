@@ -68,6 +68,23 @@ jobs:
         if: runner.os == 'Linux'
         run: bash tests/e2e_integration.sh tests/e2e_close.conf
 
+  systemd:
+    # Installs the shipped units on a real systemd host and starts them: they
+    # must come up as the unprivileged user with only CAP_NET_RAW +
+    # CAP_NET_ADMIN, and verify with no systemd diagnostics.
+    name: systemd units
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables
+
+      - name: Run systemd smoke test
+        run: sudo bash tests/systemd_smoke.sh
+
   quality:
     name: Format / lint / secrets
     runs-on: ubuntu-latest
