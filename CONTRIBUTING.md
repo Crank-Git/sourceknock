@@ -67,6 +67,19 @@ The harness runs hermetically in a private temp dir, so it needs no
 pre-existing scratch directory. It requires the daemon to be built at
 `./sourceknock` first (`make daemon`).
 
+### systemd smoke test — Linux + root + systemd
+
+`tests/systemd_smoke.sh` runs `make install`, creates the `sourceknock` user,
+and starts both `sourceknock.service` and the `sourceknock@` template against a
+dummy interface. It asserts each unit verifies with no systemd diagnostics,
+reaches "listening for knocks", runs as `sourceknock` with exactly
+`CAP_NET_RAW` + `CAP_NET_ADMIN`, programs its nft table, and stops cleanly.
+CI runs it on the ubuntu runner, which boots systemd.
+
+```sh
+sudo bash tests/systemd_smoke.sh
+```
+
 ## Formatting & lint
 
 ```sh
