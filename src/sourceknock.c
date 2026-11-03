@@ -260,16 +260,24 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
     for (size_t i = 0; i < d->n_triggers; i++)
     {
         trigger_state_t *t = &d->ts[i];
-        kn_result_t r =
-            kn_feed(t->ctx, pkt->family, &pkt->addr, pkt->sport, ts);
-        if (r == KNOCK_RESET)
-            sk_log("[%s] incomplete/wrong knock from %s: progress reset",
-                   t->tr->service, s);
+        kn_result_t r = KNOCK_IGNORE;
 
-        /* Optional admin/revoke sequence runs on its own state machine so it
-         * never interferes with the primary knock. */
-        if (t->admin_ctx)
-            kn_feed(t->admin_ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+        /* With knock_port set, only frames sent to that port are part of a
+         * knock; anything else (other traffic from the same client, replies
+         * to the server's own outbound connections) can't advance or reset
+         * it. */
+        if (knock_counts(t->tr, pkt->dport))
+        {
+            r = kn_feed(t->ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+            if (r == KNOCK_RESET)
+                sk_log("[%s] incomplete/wrong knock from %s: progress reset",
+                       t->tr->service, s);
+
+            /* Optional admin/revoke sequence runs on its own state machine
+             * so it never interferes with the primary knock. */
+            if (t->admin_ctx)
+                kn_feed(t->admin_ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+        }
 
         /* close_on_connect: a packet to the service dest port after arming
          * is the actual connection -> close the port. The arming knock

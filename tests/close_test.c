@@ -1,4 +1,4 @@
-/* close_test.c - unit tests for the close_on_connect decision. */
+/* close_test.c - unit tests for the per-packet trigger decisions. */
 #include <string.h>
 
 #include "close.h"
@@ -60,6 +60,30 @@ static void test_port_in_list(void)
     CHECK(!port_in_list(&tr, 25));
 }
 
+/* issue #40: without knock_port every frame counts; with it, only frames to
+ * that destination port do. */
+static void test_knock_counts(void)
+{
+    uint16_t ports[] = {22};
+    trigger_t tr = make_trigger(MODE_FIXED_TTL, ports, 1);
+    CHECK(knock_counts(&tr, 0));
+    CHECK(knock_counts(&tr, 22));
+    CHECK(knock_counts(&tr, 4444));
+    CHECK(knock_counts(&tr, 65535));
+
+    tr.knock_port = 4444;
+    CHECK(knock_counts(&tr, 4444));
+    CHECK(!knock_counts(&tr, 22)); /* not even the service port */
+    CHECK(!knock_counts(&tr, 0));
+    CHECK(!knock_counts(&tr, 4443));
+    CHECK(!knock_counts(&tr, 4445));
+    CHECK(!knock_counts(&tr, 65535));
+
+    /* the close decision is independent of knock_port */
+    tr.mode = MODE_CLOSE_ON_CONNECT;
+    CHECK(should_close(&tr, 1, 22, KNOCK_IGNORE));
+}
+
 int main(void)
 {
     printf("== close decision tests ==\n");
@@ -68,5 +92,6 @@ int main(void)
     TEST_RUN(test_dport_must_match);
     TEST_RUN(test_only_close_on_connect_mode);
     TEST_RUN(test_port_in_list);
+    TEST_RUN(test_knock_counts);
     TEST_SUMMARY();
 }

@@ -433,6 +433,18 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                     goto fail;
                 }
             }
+            else if (strcmp(key, "knock_port") == 0)
+            {
+                char *e;
+                long v = strtol(val, &e, 10);
+                if (*e || e == val || v < 1 || v > 65535)
+                {
+                    snprintf(err, errlen, "invalid knock_port '%s' (1..65535)",
+                             val);
+                    goto fail;
+                }
+                cur->knock_port = (uint16_t)v;
+            }
             else if (strcmp(key, "fallback_ttl") == 0)
             {
                 char *e;

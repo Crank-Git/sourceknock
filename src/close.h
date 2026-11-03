@@ -1,8 +1,9 @@
 /*
- * close.h - the close_on_connect decision (pure, cross-platform).
+ * close.h - per-packet trigger decisions (pure, cross-platform).
  *
- * Decides whether a captured packet should close an armed close_on_connect
- * trigger. No I/O, so it can be unit-tested on any OS.
+ * Decides whether a captured packet counts toward a trigger's knock, and
+ * whether it should close an armed close_on_connect trigger. No I/O, so it can
+ * be unit-tested on any OS.
  */
 #ifndef SOURCEKNOCK_CLOSE_H
 #define SOURCEKNOCK_CLOSE_H
@@ -11,6 +12,11 @@
 #include "state.h"
 #include <stddef.h>
 #include <stdint.h>
+
+/* Does a captured frame to `dport` count toward this trigger's knock (primary
+ * and admin sequences)? Always, unless the trigger sets knock_port, in which
+ * case only frames sent to that destination port do. */
+int knock_counts(const trigger_t *tr, uint16_t dport);
 
 /* Is `port` one of the trigger's service ports? */
 int port_in_list(const trigger_t *tr, uint16_t port);

@@ -496,6 +496,35 @@ static void test_examples_parse(void)
     }
 }
 
+/* ---- issue #40: knock_port ---- */
+static void test_knock_port(void)
+{
+    char err[256];
+    CHECK_EQ_INT(
+        parse("[trigger:t]\nport = 22\nsequence = 1,2,3\n", err, sizeof(err)),
+        0);
+    CHECK_EQ_INT(g_cfg.triggers[0].knock_port, 0); /* default: any port */
+    CHECK_EQ_INT(parse("[trigger:t]\nport = 22\nsequence = 1,2,3\n"
+                       "knock_port = 4444\n",
+                       err, sizeof(err)),
+                 0);
+    CHECK_EQ_INT(g_cfg.triggers[0].knock_port, 4444);
+    CHECK_EQ_INT(parse("[trigger:t]\nport = 22\nsequence = 1,2,3\n"
+                       "knock_port = 65535\n",
+                       err, sizeof(err)),
+                 0);
+    const char *bad[] = {"0", "65536", "-1", "abc", "44x", "", "1,2"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+    {
+        char c[128];
+        snprintf(c, sizeof(c),
+                 "[trigger:t]\nport = 22\nsequence = 1,2,3\nknock_port = %s\n",
+                 bad[i]);
+        CHECK(parse(c, err, sizeof(err)) == -1);
+        CHECK(strstr(err, "knock_port") != NULL);
+    }
+}
+
 int main(void)
 {
     printf("== config parser tests ==\n");
@@ -525,6 +554,7 @@ int main(void)
     TEST_RUN(test_weak_sequence);
     TEST_RUN(test_readme_example_parses);
     TEST_RUN(test_examples_parse);
+    TEST_RUN(test_knock_port);
     config_free();
     TEST_SUMMARY();
 }

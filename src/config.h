@@ -32,6 +32,8 @@ typedef struct
     trigger_mode_t mode;
     double duration;     /* seconds, for MODE_FIXED_TTL */
     double fallback_ttl; /* safety max open time (close_on_connect) */
+    uint16_t knock_port; /* optional: only frames to this dest port count
+                            toward the knock (0 = any destination) */
 } trigger_t;
 
 typedef struct
