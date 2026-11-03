@@ -214,6 +214,11 @@ are not decoded.
 ## Notes / limitations
 
 - Linux only (`AF_PACKET`, nftables).
+- Supported capture interfaces: Ethernet and loopback, and raw-IP links with
+  no link header: tun and WireGuard (`wg0`), PPP, and ipip / ip6tnl / sit
+  tunnels. The daemon logs the link type at startup and refuses anything else
+  (e.g. GRE, whose multipoint mode prefixes each frame with an outer header)
+  instead of running and never matching a knock.
 - nftables set syntax targets modern `nft` (validated on 1.0.9).
 - Only frames the host *receives* count toward a knock; frames it sends
   (including loopback's second copy of every frame) are ignored.

@@ -12,14 +12,33 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Link-layer ARPHRD_ types. Defined by <net/if_arp.h> on Linux; provide
- * portable fallbacks so the pure parser + tests build on non-Linux too. */
-#ifndef ARPHRD_ETHER
-#define ARPHRD_ETHER 1
-#endif
-#ifndef ARPHRD_LOOPBACK
-#define ARPHRD_LOOPBACK 79
-#endif
+/* Linux link-layer types (ARPHRD_* values from <linux/if_arp.h>), named here
+ * so the pure parser and its tests build on any OS. */
+#define PKT_ARPHRD_ETHER 1
+#define PKT_ARPHRD_PPP 512
+#define PKT_ARPHRD_RAWIP 519
+#define PKT_ARPHRD_TUNNEL 768  /* ipip */
+#define PKT_ARPHRD_TUNNEL6 769 /* ip6tnl */
+#define PKT_ARPHRD_LOOPBACK 772
+#define PKT_ARPHRD_SIT 776
+#define PKT_ARPHRD_IPGRE 778
+#define PKT_ARPHRD_NONE 0xFFFE /* tun, WireGuard */
+
+/* How frames on a link type are framed, as AF_PACKET (SOCK_RAW) delivers
+ * them. */
+typedef enum
+{
+    PKT_LINK_UNSUPPORTED = 0, /* we can't find the IP header reliably */
+    PKT_LINK_ETHER,           /* 14-byte Ethernet II header (incl. Linux lo) */
+    PKT_LINK_RAWIP /* no link header: frame starts at the IP header */
+} pkt_link_t;
+
+/* Classify a link type. GRE (PKT_ARPHRD_IPGRE) is unsupported: a multipoint
+ * GRE device puts the outer IP + GRE header in front of the frame. */
+pkt_link_t pkt_link_kind(unsigned int hatype);
+
+/* Short human-readable name of a link type, for logs. */
+const char *pkt_link_name(unsigned int hatype);
 
 typedef enum
 {
@@ -61,13 +80,14 @@ static inline size_t pkt_addr_len(int family)
 }
 
 /*
- * Parse a frame starting at `buf`. `link` tells us the link-layer type
- * (AF_PACKET h_type, e.g. ARPHRD_ETHER). Recognises Ethernet-II + loopback
- * link layers and both IPv4 and IPv6 network headers (IPv6 extension headers
- * are walked, bounded). Returns 1 + fills `out` on success, 0 if the frame is
- * not parseable. Never reads past `len` bytes.
+ * Parse a frame starting at `buf`. `hatype` is the interface's link type
+ * (PKT_ARPHRD_*, as in sockaddr_ll.sll_hatype). Recognises Ethernet-framed
+ * links (Ethernet, Linux loopback) and raw-IP links (tun/WireGuard, PPP, ipip,
+ * ...), and both IPv4 and IPv6 network headers (IPv6 extension headers are
+ * walked, bounded). Returns 1 + fills `out` on success, 0 if the frame is not
+ * parseable or the link type is unsupported. Never reads past `len` bytes.
  */
-int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
+int pkt_parse(const unsigned char *buf, size_t len, unsigned int hatype,
               pkt_info_t *out);
 
 /* True if the packet's source or destination is multicast/broadcast (i.e. a

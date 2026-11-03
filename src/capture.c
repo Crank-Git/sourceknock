@@ -67,11 +67,35 @@ int capture_open(capture_t *cap, const char *iface, kn_packet_fn fn, void *arg)
         return -1;
     }
 
+    /* ifr_ifindex and ifr_hwaddr share a union: keep the index before the
+     * next ioctl overwrites it. */
+    int ifindex = ifr.ifr_ifindex;
+
+    /* Link type decides where the IP header starts in each frame. Refuse
+     * anything we can't parse rather than run and silently never match. */
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0)
+    {
+        fprintf(stderr, "capture: cannot get link type of '%s': %s\n", iface,
+                strerror(errno));
+        close(fd);
+        return -1;
+    }
+    unsigned int hatype = ifr.ifr_hwaddr.sa_family;
+    if (pkt_link_kind(hatype) == PKT_LINK_UNSUPPORTED)
+    {
+        fprintf(stderr,
+                "capture: interface '%s' has link type %u (%s), which "
+                "sourceknock can't read knocks from\n",
+                iface, hatype, pkt_link_name(hatype));
+        close(fd);
+        return -1;
+    }
+
     struct sockaddr_ll sll;
     memset(&sll, 0, sizeof(sll));
     sll.sll_family = AF_PACKET;
     sll.sll_protocol = htons(ETH_P_ALL);
-    sll.sll_ifindex = ifr.ifr_ifindex;
+    sll.sll_ifindex = ifindex;
     if (bind(fd, (struct sockaddr *)&sll, sizeof(sll)) < 0)
     {
         fprintf(stderr, "capture: bind(): %s\n", strerror(errno));
@@ -91,8 +115,9 @@ int capture_open(capture_t *cap, const char *iface, kn_packet_fn fn, void *arg)
     }
 
     cap->fd = fd;
-    fprintf(stderr, "capture: listening on '%s' (ifindex %d)\n", iface,
-            ifr.ifr_ifindex);
+    cap->hatype = hatype;
+    fprintf(stderr, "capture: listening on '%s' (ifindex %d, link %s)\n", iface,
+            sll.sll_ifindex, pkt_link_name(hatype));
     return 0;
 }
 
@@ -126,10 +151,7 @@ int capture_run(capture_t *cap)
 
         double now = now_ts();
         pkt_info_t info;
-        /* sll_hatype is the ARPHRD_ link-layer type; loopback frames carry
-         * a 2-byte protocol prefix, Ethernet does not. */
-        unsigned int link = sll.sll_hatype ? sll.sll_hatype : ARPHRD_ETHER;
-        if (pkt_parse(buf, (size_t)n, link, &info))
+        if (pkt_parse(buf, (size_t)n, cap->hatype, &info))
         {
             cap->on_packet(&info, now, cap->arg);
         }

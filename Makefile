@@ -128,7 +128,9 @@ close_test: tests/close_test.o src/close.o
 fuzz-build:
 	$(FUZZ_CC) -O2 -g -std=c++14 -fsanitize=fuzzer,address \
 		-c $(FUZZ_SRC) -Isrc -o $(FUZZ_DIR)/fuzz_pkt_parse.o
-	$(FUZZ_CC) -O2 -g -fsanitize=address \
+	# fuzzer-no-link instruments packet.c for coverage. Without it only the
+	# harness is instrumented and libFuzzer can't steer into the parser.
+	$(FUZZ_CC) -O2 -g -fsanitize=fuzzer-no-link,address \
 		-c src/packet.c -Isrc -o $(FUZZ_DIR)/packet.fuzz.o
 	$(FUZZ_CC) -fsanitize=fuzzer,address \
 		$(FUZZ_DIR)/fuzz_pkt_parse.o $(FUZZ_DIR)/packet.fuzz.o -o $(FUZZ_BIN)
