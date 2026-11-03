@@ -111,6 +111,8 @@ duration = 30
 fallback_ttl = 300
 # optional revoke knock (permanent mode)
 admin_sequence = 9000,8000,7000
+# optional: only frames sent to this destination port count toward the knock
+knock_port = 4444
 ```
 
 > **Note:** the parser strips only full-line comments (lines starting with `#`
@@ -150,6 +152,15 @@ closed port sends, so a scan still sees nothing.
   when that separate knock completes, the client's IP is removed from the allowed
   set and the port closes again. The admin sequence runs on its own state machine
   (keyed by source port), so it never interferes with the primary knock.
+- `knock_port` (optional) — only frames sent to this **destination** port count
+  toward the knock (primary and admin sequences). Without it, every TCP/UDP
+  frame from a client counts, so other traffic from the same address (an
+  existing session, a browser, other hosts behind the same NAT) can reset a
+  knock in progress, and replies to the server's own outbound connections
+  (which arrive from the remote's service port) can look like knock steps.
+  Send the knock to this port (pick one nothing listens on, and not a service
+  port, so in `close_on_connect` mode a re-knock can't close the port). The
+  close-on-connect detection is unaffected.
 - `port` accepts a single port, a comma-separated list, or an inclusive range,
   e.g. `port = 22`, `port = 80, 443`, or `port = 8000-8002`. On a successful
   knock **all** listed ports are opened for the client (each port gets its own

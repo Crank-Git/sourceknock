@@ -1,6 +1,11 @@
 /* close.c - pure close_on_connect decision (no I/O, cross-platform). */
 #include "close.h"
 
+int knock_counts(const trigger_t *tr, uint16_t dport)
+{
+    return tr->knock_port == 0 || dport == tr->knock_port;
+}
+
 int port_in_list(const trigger_t *tr, uint16_t port)
 {
     for (size_t i = 0; i < tr->n_ports; i++)

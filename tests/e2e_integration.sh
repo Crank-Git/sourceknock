@@ -56,7 +56,7 @@ cleanup() {
   sudo pkill -f 'sourceknock .*/sourceknock.conf' 2>/dev/null
   sudo pkill -f 'listener\.py' 2>/dev/null
   sudo ip netns del "$NS" 2>/dev/null
-  sudo pkill -9 -f "$BIN" 2>/dev/null
+  sudo pkill -9 -x sourceknock 2>/dev/null
   sudo ip addr del $CLIENT/24 dev e2e-c 2>/dev/null
   sudo ip link del e2e-c 2>/dev/null
   sudo ip link del sktun0 2>/dev/null
@@ -214,7 +214,7 @@ if [ "$MODE" = "close_on_connect" ]; then
   echo "--- knock, SIGKILL the daemon, wait fallback_ttl (expect closed) ---"
   python3 "$DRIVER" knock "$CLIENT" "$SERVER" 0.05 "$SEQ" "$PORT"
   sleep 0.5
-  sudo pkill -9 -f "$BIN"
+  sudo pkill -9 -x sourceknock
   sleep $((FALLBACK+1))
   if probe; then check "fallback_ttl closes after daemon SIGKILL" 0 1; else check "fallback_ttl closes after daemon SIGKILL" 0 0; fi
   start_daemon || { echo "FAIL daemon did not restart"; fail=$((fail+1)); }
@@ -345,6 +345,42 @@ else
   check "gre link refused with a reason (exit $rc)" 1 0; cat "$WORK/gre.log"
 fi
 sudo ip netns exec "$NS" ip link del skgre0
+
+# knock_port: a second daemon on the same interface only counts frames sent
+# to destination port 4444. The main daemon (no knock_port) sees the same
+# frames, which shows what knock_port protects against.
+echo "--- knock_port ---"
+KP_PORT=$((PORT+11))
+printf '[global]\ninterface = e2e-s\n[trigger:kpe2e]\nport = %s\nsequence = %s\nknock_port = 4444\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$KP_PORT" "$SEQ" > "$WORK/kp.conf"
+sudo ip netns exec "$NS" setsid "$BIN" "$WORK/kp.conf" >"$WORK/kp.log" 2>&1 </dev/null &
+KP_PID=$!
+for _ in $(seq 1 50); do grep -q "listening for knocks" "$WORK/kp.log" && break; sleep 0.1; done
+udp() { python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('$CLIENT',$1)); s.sendto(b'x',('$SERVER',$2))"; }
+in_set() { sudo ip netns exec "$NS" nft list set inet "sourceknock_$1" allowed_v4 2>/dev/null | grep -q "$CLIENT"; }
+flush_sets() { for t in "$SERVICE" kpe2e; do sudo ip netns exec "$NS" nft flush set inet "sourceknock_$t" allowed_v4; done; }
+IFS=, read -ra KS <<<"$SEQ"
+
+# A: knock to 4444 with unrelated traffic from the same client in between.
+flush_sets
+for p in "${KS[@]}"; do udp "$p" 4444; sleep 0.05; udp 1234 80; sleep 0.05; done
+sleep 0.5
+in_set kpe2e && check "knock_port: unrelated traffic doesn't reset the knock" 1 1 || { check "knock_port: unrelated traffic doesn't reset the knock" 1 0; cat "$WORK/kp.log"; }
+in_set "$SERVICE" && check "without knock_port the same traffic resets it" 0 1 || check "without knock_port the same traffic resets it" 0 0
+
+# B: the right sequence sent to some other port doesn't count.
+flush_sets
+for p in "${KS[@]}"; do udp "$p" 5555; sleep 0.05; done
+sleep 0.5
+in_set kpe2e && check "knock_port: knock to another port ignored" 0 1 || check "knock_port: knock to another port ignored" 0 0
+in_set "$SERVICE" && check "without knock_port it opens" 1 1 || check "without knock_port it opens" 1 0
+
+# C: what replies to the server's outbound connections look like on the wire
+# (the remote's service port as source, the server's ephemeral port as dest).
+flush_sets
+for p in "${KS[@]}"; do udp "$p" 45678; sleep 0.05; done
+sleep 0.5
+in_set kpe2e && check "knock_port: reply-shaped traffic ignored" 0 1 || check "knock_port: reply-shaped traffic ignored" 0 0
+sudo kill -TERM "$KP_PID" 2>/dev/null; sudo pkill -TERM -f "$WORK/kp.conf"; wait "$KP_PID" 2>/dev/null
 
 # Log timestamps are wall-clock time (not time since boot).
 echo "--- log timestamps ---"

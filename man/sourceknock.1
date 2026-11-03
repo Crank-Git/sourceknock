@@ -118,6 +118,12 @@ daemon is not running.
 Optional revoke knock for
 .BI permanent
 mode; when it completes the client's IP is removed and the port closes again.
+.IP \(bu 2
+.B knock_port
+Optional destination port. When set, only frames sent to this port count
+toward the knock, so other traffic from the client (or replies to the
+server's own outbound connections) can neither advance nor reset it. Pick a
+port nothing listens on and that is not a service port.
 .RE
 .SH MODES
 .RS 4
