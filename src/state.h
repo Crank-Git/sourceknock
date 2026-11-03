@@ -38,8 +38,14 @@ typedef enum
 } kn_result_t;
 
 typedef struct kn_ctx kn_ctx_t;
+
+/* Default bound on clients tracked mid-knock at once (per state machine). */
+#define KN_DEFAULT_MAX_CLIENTS 4096
+
 /* Per-client progress. `family` (AF_INET/AF_INET6) selects which member of
- * `addr` is valid; clients are keyed by (family, address). */
+ * `addr` is valid; clients are keyed by (family, address). Only clients that
+ * are partway through a knock have an entry: it is created by a packet whose
+ * source port is seq[0] and removed on completion, reset or timeout. */
 typedef struct
 {
     int family;
@@ -51,6 +57,11 @@ typedef struct
     size_t index;
     knock_state_t state;
     double start_time;
+    /* internal: hash chain and oldest-first age list (slot indices, -1 =
+     * none) */
+    int hnext;
+    int older;
+    int newer;
 } kn_client_t;
 
 /* Called when a client completes the sequence. `ip` points at a struct in_addr
@@ -63,9 +74,19 @@ struct kn_ctx
     knock_sequence_t seq; /* the secret sequence */
     double window;        /* seconds: whole sequence must finish in this */
 
-    kn_client_t *clients; /* per-client progress, keyed by IP */
-    size_t n_clients;
-    size_t cap_clients;
+    /* Fixed-capacity client table: `max_clients` preallocated slots, a hash
+     * index over (family, address), and a list ordered by start time so
+     * expired and (when full) oldest entries are evicted in O(1). */
+    kn_client_t *slots;
+    size_t max_clients;
+    size_t n_clients; /* clients currently mid-knock */
+    int *buckets;     /* n_buckets heads, -1 = empty */
+    size_t n_buckets; /* power of two */
+    int free_head;    /* free slots, linked through hnext */
+    int oldest;
+    int newest;
+    uint32_t seed; /* per-context hash seed (spoofed IPs can't pick
+                      collisions) */
 
     kn_complete_fn on_complete; /* optional reward hook */
     void *complete_arg;
@@ -74,7 +95,10 @@ struct kn_ctx
 /* kn_client_t is fully defined above. */
 
 /* ---- lifecycle ---- */
+/* kn_create() tracks up to KN_DEFAULT_MAX_CLIENTS clients mid-knock. */
 kn_ctx_t *kn_create(const knock_sequence_t *seq, double window);
+kn_ctx_t *kn_create_bounded(const knock_sequence_t *seq, double window,
+                            size_t max_clients);
 void kn_free(kn_ctx_t *ctx);
 
 /* Install / replace the reward callback. */
@@ -88,5 +112,8 @@ kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip, uint16_t sport,
 
 /* Look up a client's progress (NULL if none / idle). */
 kn_client_t *kn_find(kn_ctx_t *ctx, int family, const void *ip);
+
+/* Number of clients currently tracked mid-knock. */
+size_t kn_count(const kn_ctx_t *ctx);
 
 #endif /* SOURCEKNOCK_STATE_H */

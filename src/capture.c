@@ -1,7 +1,9 @@
 /* capture.c - AF_PACKET raw socket capture (Linux). */
+/* Must precede every include, or it does not apply to the system headers the
+ * local header pulls in. */
+#define _POSIX_C_SOURCE 200809L
 #include "capture.h"
 
-#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +13,7 @@
 #include <net/if.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
@@ -64,11 +67,35 @@ int capture_open(capture_t *cap, const char *iface, kn_packet_fn fn, void *arg)
         return -1;
     }
 
+    /* ifr_ifindex and ifr_hwaddr share a union: keep the index before the
+     * next ioctl overwrites it. */
+    int ifindex = ifr.ifr_ifindex;
+
+    /* Link type decides where the IP header starts in each frame. Refuse
+     * anything we can't parse rather than run and silently never match. */
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0)
+    {
+        fprintf(stderr, "capture: cannot get link type of '%s': %s\n", iface,
+                strerror(errno));
+        close(fd);
+        return -1;
+    }
+    unsigned int hatype = ifr.ifr_hwaddr.sa_family;
+    if (pkt_link_kind(hatype) == PKT_LINK_UNSUPPORTED)
+    {
+        fprintf(stderr,
+                "capture: interface '%s' has link type %u (%s), which "
+                "sourceknock can't read knocks from\n",
+                iface, hatype, pkt_link_name(hatype));
+        close(fd);
+        return -1;
+    }
+
     struct sockaddr_ll sll;
     memset(&sll, 0, sizeof(sll));
     sll.sll_family = AF_PACKET;
     sll.sll_protocol = htons(ETH_P_ALL);
-    sll.sll_ifindex = ifr.ifr_ifindex;
+    sll.sll_ifindex = ifindex;
     if (bind(fd, (struct sockaddr *)&sll, sizeof(sll)) < 0)
     {
         fprintf(stderr, "capture: bind(): %s\n", strerror(errno));
@@ -76,9 +103,21 @@ int capture_open(capture_t *cap, const char *iface, kn_packet_fn fn, void *arg)
         return -1;
     }
 
+    /* Wake up at least once a second even on a silent interface, so a stop
+     * request that lands between packets is never stuck behind a blocking
+     * recvfrom(). */
+    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+    {
+        fprintf(stderr, "capture: SO_RCVTIMEO: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
     cap->fd = fd;
-    fprintf(stderr, "capture: listening on '%s' (ifindex %d)\n", iface,
-            ifr.ifr_ifindex);
+    cap->hatype = hatype;
+    fprintf(stderr, "capture: listening on '%s' (ifindex %d, link %s)\n", iface,
+            sll.sll_ifindex, pkt_link_name(hatype));
     return 0;
 }
 
@@ -86,18 +125,7 @@ int capture_run(capture_t *cap)
 {
     unsigned char buf[2048];
 
-/* Loopback (and some other) interfaces deliver each frame twice via
- * AF_PACKET. Drop near-duplicate frames seen within the window by
- * fingerprinting frame contents into a small ring buffer. */
-#define DEDUP_SIZE 2048
-#define DEDUP_WINDOW 0.5 /* seconds */
-    uint32_t dph[DEDUP_SIZE];
-    double dts[DEDUP_SIZE];
-    int dslot = 0;
-    for (int i = 0; i < DEDUP_SIZE; i++)
-        dts[i] = -1e9;
-
-    while (1)
+    while (!(cap->stop && *cap->stop))
     {
         struct sockaddr_ll sll;
         socklen_t sll_len = sizeof(sll);
@@ -105,48 +133,25 @@ int capture_run(capture_t *cap)
                              (struct sockaddr *)&sll, &sll_len);
         if (n < 0)
         {
-            if (errno == EINTR)
-            {
-                if (cap->stop && *cap->stop)
-                    return 0; /* clean shutdown requested */
+            /* EINTR: a signal (the loop condition checks for a stop
+             * request). EAGAIN: the 1s receive timeout on a quiet
+             * interface. */
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
-            }
             fprintf(stderr, "capture: recvfrom(): %s\n", strerror(errno));
             return -1;
         }
 
-        /* Fingerprint the frame (FNV-1a over up to 128 bytes + length). */
-        uint32_t h = 2166136261u;
-        size_t hn = (size_t)n < 128 ? (size_t)n : 128;
-        for (size_t i = 0; i < hn; i++)
-        {
-            h ^= buf[i];
-            h *= 16777619u;
-        }
-        h ^= (uint32_t)n;
-        h *= 16777619u;
+        /* Only frames this host RECEIVES can be a knock. AF_PACKET also
+         * hands us every frame the host sends (PACKET_OUTGOING), which would
+         * let the server's own traffic drive knock state, and on loopback is
+         * the second copy of every frame. */
+        if (sll.sll_pkttype == PACKET_OUTGOING)
+            continue;
 
         double now = now_ts();
-        int dup = 0;
-        for (int i = 0; i < DEDUP_SIZE; i++)
-        {
-            if (dts[i] > now - DEDUP_WINDOW && dph[i] == h)
-            {
-                dup = 1;
-                break;
-            }
-        }
-        if (dup)
-            continue; /* second copy of a frame we already processed */
-        dph[dslot] = h;
-        dts[dslot] = now;
-        dslot = (dslot + 1) % DEDUP_SIZE;
-
         pkt_info_t info;
-        /* sll_hatype is the ARPHRD_ link-layer type; loopback frames carry
-         * a 2-byte protocol prefix, Ethernet does not. */
-        unsigned int link = sll.sll_hatype ? sll.sll_hatype : ARPHRD_ETHER;
-        if (pkt_parse(buf, (size_t)n, link, &info))
+        if (pkt_parse(buf, (size_t)n, cap->hatype, &info))
         {
             cap->on_packet(&info, now, cap->arg);
         }

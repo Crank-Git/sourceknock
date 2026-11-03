@@ -39,14 +39,26 @@ make test       # build + run the cross-platform unit tests
 ```
 
 This runs `state_test`, `packet_test`, `config_test`, and `close_test` against
-the pure core (no socket code), so it works on any OS with a C compiler.
+the pure core (no socket code), so it works on any OS with a C compiler. It
+also builds the `sourceknock-knock` client and runs
+`tests/knock_client_test.py`, which sends real knocks to local UDP receivers
+and checks the source ports, order and error handling (needs `python3`).
+
+```sh
+make test-asan  # the same suites under ASan + LeakSanitizer + UBSan
+```
+
+CI runs `make test-asan` on Linux, where LeakSanitizer is available, so a leak
+anywhere in the parsers fails the build.
 
 ### Integration (e2e) test — Linux + root only
 
 `tests/e2e_integration.sh` drives a full knock cycle inside a Linux network
 namespace over a real veth capture interface and real nftables: it knocks,
 asserts the service port opens, then asserts it closes again (on the fixed TTL
-or on first connect). It exits non-zero if any expectation is wrong.
+or on first connect). It also holds long-lived echo sessions open across daemon
+startup and across the port closing, and checks what SYN/FIN/NULL/ACK scans
+see on the hidden port. It exits non-zero if any expectation is wrong.
 
 ```sh
 # on a Linux host with sudo:
@@ -57,6 +69,19 @@ sudo bash tests/e2e_integration.sh tests/e2e_close.conf
 The harness runs hermetically in a private temp dir, so it needs no
 pre-existing scratch directory. It requires the daemon to be built at
 `./sourceknock` first (`make daemon`).
+
+### systemd smoke test — Linux + root + systemd
+
+`tests/systemd_smoke.sh` runs `make install`, creates the `sourceknock` user,
+and starts both `sourceknock.service` and the `sourceknock@` template against a
+dummy interface. It asserts each unit verifies with no systemd diagnostics,
+reaches "listening for knocks", runs as `sourceknock` with exactly
+`CAP_NET_RAW` + `CAP_NET_ADMIN`, programs its nft table, and stops cleanly.
+CI runs it on the ubuntu runner, which boots systemd.
+
+```sh
+sudo bash tests/systemd_smoke.sh
+```
 
 ## Formatting & lint
 

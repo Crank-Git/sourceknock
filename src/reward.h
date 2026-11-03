@@ -10,7 +10,8 @@
  *     set allowed_v6 { type ipv6_addr; flags timeout size 256; }
  *     chain service {
  *       type filter hook input priority 0; policy accept (other ports
- * untouched) # one accept (per family) + one drop rule per service port: ip
+ * untouched) ct state established,related accept (open sessions survive the
+ * port closing) # one accept (per family) + one drop rule per service port: ip
  * saddr @allowed_v4 <proto> dport <port1> accept ip6 saddr @allowed_v6 <proto>
  * dport <port1> accept <proto> dport <port1> drop (port closed by default for
  * everyone else)
@@ -38,7 +39,8 @@ typedef struct
     int initialized;
 } reward_t;
 
-/* Create table/set/chain if missing. Idempotent. Returns 0 on success.
+/* Create table/set/chain if missing. Idempotent. Returns 0 on success; if any
+ * nft command fails it removes the table again and returns -1.
  * `table` is the full nft table name (e.g. "inet sourceknock_ssh"); callers
  * must give each trigger a distinct name so multiple triggers don't clobber
  * each other's rules. */
@@ -46,8 +48,10 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
                 size_t n_ports, proto_t proto, double fallback_ttl);
 
 /* Open the port for `ip`. `family` is AF_INET or AF_INET6 and `ip` points at
- * the matching address struct. For fixed_ttl modes the caller passes a
- * timeout; pass <=0 for "no timeout" (close_on_connect). Returns 0. */
+ * the matching address struct. `timeout` is the kernel-enforced lifetime of the
+ * element (duration for fixed_ttl, fallback_ttl for close_on_connect); pass <=0
+ * for "no timeout" (permanent). Re-opening an open IP restarts its timeout.
+ * Returns 0 on success. */
 int reward_open(reward_t *r, int family, const void *ip, double timeout);
 
 /* Close the port for `ip` (remove from the family's allowed set). Returns 0. */
@@ -55,5 +59,10 @@ int reward_close(reward_t *r, int family, const void *ip);
 
 /* Remove every element from both allowed sets (used on shutdown/reinit). */
 int reward_flush(reward_t *r);
+
+/* Delete the whole table, restoring the host to its pre-daemon state. Used when
+ * startup fails after some triggers were already programmed, so the daemon
+ * never exits leaving a service port closed with nothing to open it. */
+int reward_destroy(reward_t *r);
 
 #endif /* SOURCEKNOCK_REWARD_H */

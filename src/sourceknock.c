@@ -41,10 +41,12 @@ static double mono(void)
 
 static void sk_log(const char *fmt, ...)
 {
+    /* Wall-clock time for humans; knock timing uses mono() instead. */
     char ts[32];
-    time_t t = (time_t)mono();
-    struct tm *tm = localtime(&t);
-    strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(ts, sizeof(ts), "%H:%M:%S", &tm);
     fprintf(stderr, "[%s] ", ts);
     va_list ap;
     va_start(ap, fmt);
@@ -77,8 +79,12 @@ typedef struct
     reward_t reward;
     kn_ctx_t *ctx;       /* primary: completes -> open the port */
     kn_ctx_t *admin_ctx; /* optional: completes -> revoke (remove IP) */
-    armed_entry_t armed[64];
+    /* close_on_connect clients awaiting their connection. Growable: the nft
+     * element carries the real fallback_ttl, so this list only drives the
+     * early close and logging, and must never silently drop a client. */
+    armed_entry_t *armed;
     int n_armed;
+    int cap_armed;
 } trigger_state_t;
 
 typedef struct
@@ -86,35 +92,6 @@ typedef struct
     trigger_state_t *ts; /* one entry per trigger */
     size_t n_triggers;
 } daemon_t;
-
-/* Build an nft-safe table name for a trigger: "inet sourceknock_<service>",
- * with the service sanitized to [a-z0-9_]. */
-static void build_table_name(char *out, size_t outlen, const char *service)
-{
-    size_t i = 0;
-    int n = snprintf(out, outlen, "inet sourceknock_");
-    if (n < 0)
-    {
-        out[0] = '\0';
-        return;
-    }
-    i = (size_t)n;
-    while (*service && i + 1 < outlen)
-    {
-        char c = *service;
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '_')
-        {
-            out[i++] = c;
-        }
-        else
-        {
-            out[i++] = '_';
-        }
-        service++;
-    }
-    out[i] = '\0';
-}
 
 static int find_armed(trigger_state_t *ts, int family, const void *ip)
 {
@@ -128,8 +105,27 @@ static int find_armed(trigger_state_t *ts, int family, const void *ip)
 static void arm_ip(trigger_state_t *ts, int family, const void *ip,
                    double deadline)
 {
-    if (ts->n_armed >= 64)
+    /* A re-knock from an armed client just refreshes its deadline. */
+    int idx = find_armed(ts, family, ip);
+    if (idx >= 0)
+    {
+        ts->armed[idx].deadline = deadline;
         return;
+    }
+    if (ts->n_armed == ts->cap_armed)
+    {
+        int ncap = ts->cap_armed ? ts->cap_armed * 2 : 16;
+        armed_entry_t *na = realloc(ts->armed, (size_t)ncap * sizeof(*na));
+        if (!na)
+        {
+            /* The kernel still expires the element at fallback_ttl. */
+            sk_log("[%s] out of memory tracking armed client", ts->tr->service);
+            return;
+        }
+        ts->armed = na;
+        ts->cap_armed = ncap;
+    }
+    memset(&ts->armed[ts->n_armed], 0, sizeof(ts->armed[ts->n_armed]));
     ts->armed[ts->n_armed].family = family;
     memcpy(&ts->armed[ts->n_armed].addr, ip, pkt_addr_len(family));
     ts->armed[ts->n_armed].deadline = deadline;
@@ -159,7 +155,10 @@ static void fmt_ports(const trigger_t *tr, char *out, size_t n)
     out[off] = '\0';
 }
 
-/* Remove armed entries whose deadline has passed (safety net). */
+/* Forget armed entries whose fallback_ttl has passed. The nft element was
+ * added with fallback_ttl as its timeout, so the kernel has already closed the
+ * port (even if this daemon saw no packets, or wasn't running); this only
+ * tidies our list and logs it. */
 static void cleanup_armed(trigger_state_t *ts, double now)
 {
     int i = 0;
@@ -169,8 +168,8 @@ static void cleanup_armed(trigger_state_t *ts, double now)
         {
             char s[48];
             ipstr(ts->armed[i].family, &ts->armed[i].addr, s, sizeof(s));
-            sk_log("fallback_ttl reached: closing port for %s (no connect)", s);
-            reward_close(&ts->reward, ts->armed[i].family, &ts->armed[i].addr);
+            sk_log("[%s] fallback_ttl reached for %s (no connect): port closed",
+                   ts->tr->service, s);
             drop_armed(ts, i);
         }
         else
@@ -189,7 +188,13 @@ static void on_complete(kn_ctx_t *ctx, int family, const void *ip, void *arg)
     char s[48];
     ipstr(family, ip, s, sizeof(s));
 
-    double timeout = (tr->mode == MODE_FIXED_TTL) ? tr->duration : 0.0;
+    /* Every non-permanent mode gets a kernel-enforced timeout, so the port
+     * closes even if the daemon never sees another packet or dies. */
+    double timeout = 0.0;
+    if (tr->mode == MODE_FIXED_TTL)
+        timeout = tr->duration;
+    else if (tr->mode == MODE_CLOSE_ON_CONNECT)
+        timeout = tr->fallback_ttl;
     const char *proto = (tr->protocol == PROTO_UDP) ? "udp" : "tcp";
 
     if (reward_open(&ts->reward, family, ip, timeout) == 0)
@@ -255,16 +260,24 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
     for (size_t i = 0; i < d->n_triggers; i++)
     {
         trigger_state_t *t = &d->ts[i];
-        kn_result_t r =
-            kn_feed(t->ctx, pkt->family, &pkt->addr, pkt->sport, ts);
-        if (r == KNOCK_RESET)
-            sk_log("[%s] incomplete/wrong knock from %s: progress reset",
-                   t->tr->service, s);
+        kn_result_t r = KNOCK_IGNORE;
 
-        /* Optional admin/revoke sequence runs on its own state machine so it
-         * never interferes with the primary knock. */
-        if (t->admin_ctx)
-            kn_feed(t->admin_ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+        /* With knock_port set, only frames sent to that port are part of a
+         * knock; anything else (other traffic from the same client, replies
+         * to the server's own outbound connections) can't advance or reset
+         * it. */
+        if (knock_counts(t->tr, pkt->dport))
+        {
+            r = kn_feed(t->ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+            if (r == KNOCK_RESET)
+                sk_log("[%s] incomplete/wrong knock from %s: progress reset",
+                       t->tr->service, s);
+
+            /* Optional admin/revoke sequence runs on its own state machine
+             * so it never interferes with the primary knock. */
+            if (t->admin_ctx)
+                kn_feed(t->admin_ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+        }
 
         /* close_on_connect: a packet to the service dest port after arming
          * is the actual connection -> close the port. The arming knock
@@ -287,7 +300,8 @@ static void on_packet(const pkt_info_t *pkt, double ts, void *arg)
 
 int main(int argc, char **argv)
 {
-    const char *path = (argc > 1) ? argv[1] : "/etc/sourceknock.conf";
+    const char *path =
+        (argc > 1) ? argv[1] : "/etc/sourceknock/sourceknock.conf";
 
     char err[256];
     if (config_parse_file(path, err, sizeof(err)) != 0)
@@ -303,9 +317,18 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
-    signal(SIGPIPE, SIG_IGN);
+    /* sigaction, not signal(): signal()'s semantics depend on feature macros
+     * (BSD semantics add SA_RESTART, so recvfrom() would never return EINTR)
+     * and System V semantics reset the handler after the first signal. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; /* no SA_RESTART: let a signal interrupt recvfrom() */
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &sa, NULL);
 
     sk_log("sourceknock starting: interface '%s' (%zu trigger(s))",
            g_cfg.interface, g_cfg.n_triggers);
@@ -320,6 +343,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Open the capture first: a bad interface name should fail before any
+     * firewall rule is touched. */
+    capture_t cap;
+    if (capture_open(&cap, g_cfg.interface, on_packet, &d) != 0)
+    {
+        fprintf(stderr, "capture open failed (need root?)\n");
+        free(d.ts);
+        return 1;
+    }
+
     /* Per-trigger: reward table (namespaced by service) + state machine. */
     for (size_t i = 0; i < d.n_triggers; i++)
     {
@@ -327,15 +360,20 @@ int main(int argc, char **argv)
         trigger_state_t *t = &d.ts[i];
         t->tr = tr;
 
-        char table[128];
-        build_table_name(table, sizeof(table), tr->service);
+        /* Validated by the config parser: fits, and unique per trigger. */
+        char table[CONFIG_TABLE_NAME_MAX];
+        config_table_name(tr->service, table, sizeof(table));
+
+        char why[160];
+        if (config_weak_sequence(tr, why, sizeof(why)))
+            sk_log("[%s] warning: %s", tr->service, why);
 
         if (reward_init(&t->reward, table, tr->ports, tr->n_ports, tr->protocol,
                         tr->fallback_ttl) != 0)
         {
             fprintf(stderr, "reward init failed for trigger '%s'\n",
                     tr->service);
-            return 1;
+            goto fail_start;
         }
 
         knock_sequence_t seq = {.ports = tr->sequence, .len = tr->seq_len};
@@ -344,7 +382,7 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "state machine create failed for trigger '%s'\n",
                     tr->service);
-            return 1;
+            goto fail_start;
         }
         kn_set_complete(t->ctx, on_complete, t);
 
@@ -359,18 +397,10 @@ int main(int argc, char **argv)
                 fprintf(stderr,
                         "admin state machine create failed for trigger '%s'\n",
                         tr->service);
-                return 1;
+                goto fail_start;
             }
             kn_set_complete(t->admin_ctx, on_revoke, t);
         }
-    }
-
-    /* capture */
-    capture_t cap;
-    if (capture_open(&cap, g_cfg.interface, on_packet, &d) != 0)
-    {
-        fprintf(stderr, "capture open failed (need root?)\n");
-        return 1;
     }
 
     cap.stop = &g_stop;
@@ -385,8 +415,25 @@ int main(int argc, char **argv)
         reward_flush(&d.ts[i].reward);
         kn_free(d.ts[i].ctx);
         kn_free(d.ts[i].admin_ctx);
+        free(d.ts[i].armed);
     }
     free(d.ts);
+    config_free();
     sk_log("sourceknock stopped");
     return rc == 0 ? 0 : 1;
+
+fail_start:
+    /* Startup failed after some triggers may already have been programmed.
+     * Remove their tables so we never exit leaving a service port closed with
+     * no daemon to open it. */
+    capture_close(&cap);
+    for (size_t i = 0; i < d.n_triggers; i++)
+    {
+        reward_destroy(&d.ts[i].reward);
+        kn_free(d.ts[i].ctx);
+        kn_free(d.ts[i].admin_ctx);
+    }
+    free(d.ts);
+    config_free();
+    return 1;
 }

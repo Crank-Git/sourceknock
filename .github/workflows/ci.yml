@@ -23,11 +23,18 @@ jobs:
       - name: Run unit tests (cross-platform core)
         run: make test
 
+      # Same suites under ASan + LeakSanitizer + UBSan (LSan is Linux-only).
+      - name: Run unit tests under sanitizers (Linux)
+        if: runner.os == 'Linux'
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        run: make test-asan
+
       # The daemon layer (AF_PACKET / nftables) is Linux-only, so only build
       # it where the Linux kernel headers are available.
-      - name: Build daemon (Linux)
+      - name: Build daemon + knock client (Linux)
         if: runner.os == 'Linux'
-        run: make daemon
+        run: make daemon client
 
       - name: Verify daemon binary
         if: runner.os == 'Linux'
@@ -52,7 +59,7 @@ jobs:
       - name: Install nftables (Linux e2e)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y nftables
+          sudo apt-get install -y nftables libcap2-bin
           nft --version
       - name: Run e2e integration test (fixed_ttl)
         if: runner.os == 'Linux'
@@ -60,6 +67,23 @@ jobs:
       - name: Run e2e integration test (close_on_connect)
         if: runner.os == 'Linux'
         run: bash tests/e2e_integration.sh tests/e2e_close.conf
+
+  systemd:
+    # Installs the shipped units on a real systemd host and starts them: they
+    # must come up as the unprivileged user with only CAP_NET_RAW +
+    # CAP_NET_ADMIN, and verify with no systemd diagnostics.
+    name: systemd units
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables
+
+      - name: Run systemd smoke test
+        run: sudo bash tests/systemd_smoke.sh
 
   quality:
     name: Format / lint / secrets

@@ -1,7 +1,8 @@
 /* reward.c - nftables reward mechanism (Linux). */
+/* Must precede every include (see capture.c). */
+#define _POSIX_C_SOURCE 200809L
 #include "reward.h"
 
-#define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>
@@ -10,12 +11,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* Run `nft <args...>`. Returns child exit status, -1 on exec failure. */
-static int run_nft(char **args)
+/* Run `nft <args...>`. Returns child exit status, -1 on exec failure. With
+ * `quiet`, nft's own error output is discarded (for commands whose failure is
+ * expected, e.g. deleting an element that may not exist). */
+static int run_nft(char **args, int quiet)
 {
     pid_t pid = fork();
     if (pid == 0)
     {
+        if (quiet && !freopen("/dev/null", "w", stderr))
+            _exit(127);
         /* The daemon runs as root; don't let a hostile PATH redirect the
          * nft binary. Pin a sane PATH in the child before exec. */
         setenv("PATH", "/usr/sbin:/sbin:/usr/bin:/bin", 1);
@@ -23,8 +28,21 @@ static int run_nft(char **args)
         fprintf(stderr, "reward: exec nft failed: %s\n", strerror(errno));
         _exit(127);
     }
+    if (pid < 0)
+    {
+        fprintf(stderr, "reward: fork(): %s\n", strerror(errno));
+        return -1;
+    }
     int status = 0;
-    waitpid(pid, &status, 0);
+    pid_t w;
+    do
+        w = waitpid(pid, &status, 0);
+    while (w < 0 && errno == EINTR);
+    if (w < 0)
+    {
+        fprintf(stderr, "reward: waitpid(): %s\n", strerror(errno));
+        return -1;
+    }
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return -1;
@@ -32,7 +50,7 @@ static int run_nft(char **args)
 
 /* Run `nft <cmd>` where cmd is whitespace-separated tokens. Returns 0 on
  * nft exit 0. */
-static int run_nft_str(const char *cmd)
+static int run_nft_cmd(const char *cmd, int quiet)
 {
     char work[512];
     char *argv[64];
@@ -56,17 +74,26 @@ static int run_nft_str(const char *cmd)
         return -1;
     argv[n] = NULL;
 
-    int rc = run_nft(argv);
-    if (rc != 0)
+    int rc = run_nft(argv, quiet);
+    if (rc != 0 && !quiet)
         fprintf(stderr, "reward: nft '%s' failed (exit %d)\n", cmd, rc);
     return rc == 0 ? 0 : -1;
 }
+
+static int run_nft_str(const char *cmd) { return run_nft_cmd(cmd, 0); }
 
 /* Format a timeout in seconds as an nft duration string. */
 static void fmt_timeout(char *out, size_t outlen, double secs)
 {
     long s = (long)secs;
-    if (s % 60 == 0 && s >= 60)
+    if ((double)s != secs)
+    {
+        /* Fractional seconds (e.g. fallback_ttl = 1.5): use milliseconds
+         * rather than truncating, which could produce a 0s timeout. */
+        long ms = (long)(secs * 1000.0 + 0.5);
+        snprintf(out, outlen, "%ldms", ms > 0 ? ms : 1);
+    }
+    else if (s % 60 == 0 && s >= 60)
         /* nft duration units are single-letter: s/m/h/d. The word "min" is
          * rejected by modern nft, so emit "m" for minutes. */
         snprintf(out, outlen, "%ldm", s / 60);
@@ -93,31 +120,43 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
     r->fallback_ttl = fallback_ttl > 0 ? fallback_ttl : 30.0;
 
     char cmd[512];
+    int failed = 0; /* any nft command below failing aborts startup */
 
-    /* Table (ignore "already exists"). */
+    /* `add` is idempotent for an identical table/set/chain, so only a real
+     * failure (no nft, no CAP_NET_ADMIN, a conflicting object) is reported. */
     snprintf(cmd, sizeof(cmd), "add table %s", r->table);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
 
     /* Per-family allowed sets (per-element timeout). */
     snprintf(cmd, sizeof(cmd),
              "add set %s %s { type ipv4_addr; flags timeout; size 256; }",
              r->table, r->set_v4);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
     snprintf(cmd, sizeof(cmd),
              "add set %s %s { type ipv6_addr; flags timeout; size 256; }",
              r->table, r->set_v6);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
 
     /* Base chain, policy accept so other traffic is unaffected. */
     snprintf(
         cmd, sizeof(cmd),
         "add chain %s %s { type filter hook input priority 0; policy accept; }",
         r->table, r->chain);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
 
     /* Clear any prior rules (idempotent re-init). */
     snprintf(cmd, sizeof(cmd), "flush chain %s %s", r->table, r->chain);
-    run_nft_str(cmd);
+    failed |= run_nft_str(cmd);
+
+    /* Let established flows through before any drop rule. A drop in any base
+     * chain is final in nftables (an accept elsewhere can't override it), so
+     * without this, removing an IP from the allowed set - TTL expiry, close on
+     * connect, admin revoke - and even starting the daemon would cut sessions
+     * that are already open. Only NEW connections are gated by the knock. */
+    snprintf(cmd, sizeof(cmd),
+             "add rule %s %s ct state established,related accept", r->table,
+             r->chain);
+    failed |= run_nft_str(cmd);
 
     /* One accept (per family) + one drop rule per service port. The drop rule
      * matches both families in an inet table. Adding an IP to the allowed set
@@ -128,15 +167,44 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
         snprintf(cmd, sizeof(cmd),
                  "add rule %s %s ip saddr @%s %s dport %d accept", r->table,
                  r->chain, r->set_v4, proto_str(proto), port);
-        run_nft_str(cmd);
+        failed |= run_nft_str(cmd);
         snprintf(cmd, sizeof(cmd),
                  "add rule %s %s ip6 saddr @%s %s dport %d accept", r->table,
                  r->chain, r->set_v6, proto_str(proto), port);
-        run_nft_str(cmd);
+        failed |= run_nft_str(cmd);
+
+        /* TCP sessions that were open before conntrack started tracking them
+         * (e.g. the admin's SSH session when the daemon first starts on a host
+         * with no other stateful firewall) show up as ct state "new" on their
+         * first mid-stream packet. Accept segments that carry ACK but not SYN:
+         * they can never open a connection (that needs a SYN), and a stray ACK
+         * gets a RST whether or not the port is open, so this leaks nothing to
+         * a scanner. Once accepted, conntrack picks the flow up. */
+        if (proto == PROTO_TCP)
+        {
+            snprintf(cmd, sizeof(cmd),
+                     "add rule %s %s tcp dport %d tcp flags & (syn | ack) == "
+                     "ack accept",
+                     r->table, r->chain, port);
+            failed |= run_nft_str(cmd);
+        }
 
         snprintf(cmd, sizeof(cmd), "add rule %s %s %s dport %d drop", r->table,
                  r->chain, proto_str(proto), port);
-        run_nft_str(cmd);
+        failed |= run_nft_str(cmd);
+    }
+
+    if (failed)
+    {
+        /* Don't leave a half-built table behind: a drop rule without its
+         * accept rules would lock everyone out with no daemon running. */
+        snprintf(cmd, sizeof(cmd), "delete table %s", r->table);
+        run_nft_cmd(cmd, 1);
+        fprintf(stderr,
+                "reward: could not program nftables table %s (is nft "
+                "installed, and do we have CAP_NET_ADMIN?)\n",
+                r->table);
+        return -1;
     }
 
     r->initialized = 1;
@@ -167,6 +235,12 @@ int reward_open(reward_t *r, int family, const void *ip, double timeout)
     char to[32];
     if (timeout > 0)
     {
+        /* `add element` on an element that already exists is a no-op and
+         * keeps its old timeout, so a re-knock would not restart the clock.
+         * Drop any existing element first (it may well not exist). */
+        snprintf(cmd, sizeof(cmd), "delete element %s %s { %s }", r->table, set,
+                 ipstr);
+        run_nft_cmd(cmd, 1);
         fmt_timeout(to, sizeof(to), timeout);
         snprintf(cmd, sizeof(cmd), "add element %s %s { %s timeout %s }",
                  r->table, set, ipstr, to);
@@ -197,16 +271,25 @@ int reward_close(reward_t *r, int family, const void *ip)
     return run_nft_str(cmd);
 }
 
+int reward_destroy(reward_t *r)
+{
+    if (!r->initialized)
+        return -1;
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "delete table %s", r->table);
+    r->initialized = 0;
+    return run_nft_str(cmd);
+}
+
 int reward_flush(reward_t *r)
 {
     if (!r->initialized)
         return -1;
     char cmd[512];
-    /* Remove every element from both family sets. */
-    snprintf(cmd, sizeof(cmd), "delete element %s %s { * }", r->table,
-             r->set_v4);
-    run_nft_str(cmd);
-    snprintf(cmd, sizeof(cmd), "delete element %s %s { * }", r->table,
-             r->set_v6);
-    return run_nft_str(cmd);
+    /* Remove every element from both family sets. (`delete element ... { * }`
+     * is not valid nft syntax; it always failed, so nothing was flushed.) */
+    snprintf(cmd, sizeof(cmd), "flush set %s %s", r->table, r->set_v4);
+    int rc = run_nft_str(cmd);
+    snprintf(cmd, sizeof(cmd), "flush set %s %s", r->table, r->set_v6);
+    return run_nft_str(cmd) | rc;
 }
