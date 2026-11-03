@@ -63,6 +63,10 @@ sudo bash tests/e2e_integration.sh tests/e2e_fixed.conf
 sudo bash tests/e2e_integration.sh tests/e2e_close.conf
 ```
 
+The harness runs hermetically in a private temp dir, so it needs no
+pre-existing scratch directory. It requires the daemon to be built at
+`./sourceknock` first (`make daemon`).
+
 ### systemd smoke test — Linux + root + systemd
 
 `tests/systemd_smoke.sh` runs `make install`, creates the `sourceknock` user,
@@ -75,10 +79,6 @@ CI runs it on the ubuntu runner, which boots systemd.
 ```sh
 sudo bash tests/systemd_smoke.sh
 ```
-
-The e2e harness runs hermetically in a private temp dir, so it needs no
-pre-existing scratch directory. It requires the daemon to be built at
-`./sourceknock` first (`make daemon`).
 
 ## Formatting & lint
 
