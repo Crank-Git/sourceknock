@@ -18,76 +18,102 @@ scan.
 
 ## How it works
 
-1. The daemon captures packets on an interface (`AF_PACKET`, root).
+1. The daemon captures the frames an interface receives (`AF_PACKET`, root).
 2. For each packet it extracts the **source port** (and source IP). Both IPv4
    and IPv6 frames are captured and decoded (IPv6 extension headers are walked,
    bounded).
-3. A small state machine watches each client's stream of source ports. When it
-   sees the configured ordered sequence within the timing window, it "triggers".
-4. On trigger the daemon programs **nftables** to temporarily allow that client's
-   IP to reach the hidden service port, then closes it again (after a fixed TTL,
-   or on first connect).
+3. A small state machine follows each client that is partway through a knock
+   (bounded; ordinary traffic creates no state). When it sees the configured
+   ordered sequence within the timing window, it "triggers".
+4. On trigger the daemon programs **nftables** to allow that client's IP to
+   reach the hidden service port(s), then closes it again (after a fixed TTL,
+   on first connect, or on an admin revoke). Connections already established
+   keep working when it closes.
 
 ```
-client                              server
-----                              --------
-TCP sport=7000 ->  dst=X:PORT      \
-TCP sport=8000 ->  dst=X:PORT   ==>  state machine sees 7000,8000,9000
-TCP sport=9000 ->  dst=X:PORT      /   -> adds src IP to nft "allowed" set
-TCP sport=<ephemeral> -> dst=X:22  ->   port 22 now reachable for this IP
+client (sourceknock-knock)          server (sourceknock)
+------                              --------------------
+UDP sport=7000 -> dst=X:PORT        \
+UDP sport=8000 -> dst=X:PORT     ==>  state machine sees 7000,8000,9000
+UDP sport=9000 -> dst=X:PORT        /   -> adds src IP to nft "allowed" set
+TCP sport=<ephemeral> -> dst=X:22   ->  port 22 now reachable for this IP
 ```
+
+`PORT` is any port unless the trigger sets `knock_port` (see
+[Configuration](#configuration)).
 
 ## Layout
 
 | File | Purpose |
 |------|---------|
-| `src/state.c`   | Pure knock-sequence state machine (no OS deps) |
-| `src/packet.c`  | Parse Ethernet/IPv4/IPv6 frames into (src IP, sport, dport, proto) |
-| `src/config.c`  | INI-style config parser (knockd-flavoured) |
-| `src/capture.c` | `AF_PACKET` raw-socket capture (Linux) with frame de-duplication |
+| `src/state.c`   | Pure knock-sequence state machine (no OS deps), bounded client table |
+| `src/packet.c`  | Parse Ethernet / raw-IP frames (IPv4, IPv6) into (src IP, sport, dport, proto) |
+| `src/config.c`  | INI-style config parser and validation (knockd-flavored) |
+| `src/close.c`   | Pure per-packet decisions: does a frame count toward a knock (`knock_port`), does it close a `close_on_connect` port |
+| `src/capture.c` | `AF_PACKET` raw-socket capture (Linux): link-type detection, received frames only |
 | `src/reward.c`  | nftables management: open/close the service port for a client IP |
 | `src/sourceknock.c` | Daemon: wires capture -> state machine -> reward |
 | `src/knock.c`   | `sourceknock-knock`, the client that sends a knock (Linux/macOS) |
-| `tests/`        | Unit tests (run on any OS) |
+| `tests/`        | Unit tests (any OS), knock-client tests, e2e and systemd tests (Linux + root), fuzz target |
+| `contrib/systemd/` | `sourceknock.service` and the `sourceknock@.service` template |
+| `man/`          | `sourceknock(1)`, `sourceknock-knock(1)` |
+| `examples/`     | Sample configs (SSH, web, WireGuard) |
 
-The core (state machine, packet parsing, config) is deliberately free of socket
-code so it unit-tests anywhere. The Linux-only layers (`AF_PACKET`, nftables)
-live in `capture.c` / `reward.c`.
+The core (state machine, packet parsing, config, per-packet decisions) is
+deliberately free of socket code so it unit-tests anywhere. The Linux-only
+layers (`AF_PACKET`, nftables) live in `capture.c` / `reward.c`.
 
 ## Build & test
 
 ```sh
-make test      # build + run unit tests (any OS with a C compiler)
+make test      # unit tests + knock-client tests (any OS with a C compiler + python3)
+make test-asan # the same under ASan + LeakSanitizer + UBSan
 make client    # build the sourceknock-knock client (Linux, macOS)
 make daemon    # build the sourceknock daemon (Linux only; needs kernel headers)
+make fuzz      # 60s libFuzzer run on the packet parser (Linux, clang)
 ```
 
-Integration testing needs Linux + root (for `AF_PACKET` and `nft`).
+The daemon-level tests need Linux and root (for `AF_PACKET`, network
+namespaces and `nft`); see [CONTRIBUTING](CONTRIBUTING.md):
+
+```sh
+make daemon client
+sudo bash tests/e2e_integration.sh tests/e2e_fixed.conf
+sudo bash tests/e2e_integration.sh tests/e2e_close.conf
+sudo bash tests/systemd_smoke.sh   # needs a running systemd
+```
 
 ## Continuous Integration
 
-CI runs on every push and pull request across a Linux and a macOS runner
-(GitHub Actions):
+CI runs on every push and pull request (GitHub Actions):
 
-- **Unit tests** (`make test`) run on both — the core (state machine, packet
-  parsing, config) is cross-platform.
-- **Daemon build** (`make daemon`) runs on Linux, where the `AF_PACKET` /
-  nftables layers compile.
+- **Unit + client tests** (`make test`) on Linux and macOS.
+- **Sanitizers** (`make test-asan`: ASan + LeakSanitizer + UBSan) on Linux.
+- **Daemon + client build** and a bounded **libFuzzer** run on the packet
+  parser, on Linux.
+- **End-to-end tests** on Linux: the real daemon in a network namespace with
+  real nftables, in both `fixed_ttl` and `close_on_connect` modes (knock/open/
+  close, long-lived sessions surviving the close, what scans see, startup
+  failures, many clients, loopback and ipip links, `knock_port`, shutdown).
+- **systemd units**: installs and starts both units on the runner and checks
+  they run unprivileged with only `CAP_NET_RAW` + `CAP_NET_ADMIN`.
+- **Format / lint / secrets**: clang-format, clang-tidy (advisory), gitleaks.
 
 Workflow definitions live in `.github/workflows/`.
 
 ## Releases
 
-Cut a release by pushing a `v*` tag. CI builds the Linux daemon and publishes
-it as a GitHub Release artifact:
+Cut a release by pushing a `v*` tag on `main`. CI runs the tests, builds the
+Linux daemon and knock client, and publishes both as GitHub Release
+artifacts:
 
 ```sh
-git tag -a v1.0.0 -m "sourceknock 1.0.0"
-git push origin v1.0.0
+git tag -a v1.1.0 -m "sourceknock 1.1.0"
+git push origin v1.1.0
 ```
 
-The release attaches a `sourceknock` binary built on `ubuntu-latest`. (The
-daemon is Linux-only; the cross-platform unit tests run in CI on every change.)
+The release attaches `sourceknock` and `sourceknock-knock` built on
+`ubuntu-latest` (x86-64 Linux). On macOS, build the client with `make client`.
 
 ## Configuration
 
@@ -114,7 +140,8 @@ fallback_ttl = 300
 # optional revoke knock (permanent mode)
 admin_sequence = 9000,8000,7000
 # optional: only frames sent to this destination port count toward the knock
-knock_port = 4444
+# (then knock with `sourceknock-knock -p 4444 ...`)
+# knock_port = 4444
 ```
 
 > **Note:** the parser strips only full-line comments (lines starting with `#`
@@ -181,9 +208,17 @@ ssh user@server.example.com
 ```
 
 Options: `-p PORT` destination port (the trigger's `knock_port`, if it sets
-one; default 9), `-d MS` delay between steps (default 50), `-s ADDR` local
-address, `-4`/`-6`. Source ports below 1024 need root on Linux. See
-`man sourceknock-knock`.
+one; default 9), `-d MS` delay between steps (default 50; keep the whole knock
+inside `window`), `-s ADDR` local address, `-4`/`-6`. Source ports below 1024
+need root on Linux. See `man sourceknock-knock`.
+
+```sh
+# a trigger with knock_port = 4444, over IPv6
+sourceknock-knock -6 -p 4444 server.example.com 7000,8000,9000
+```
+
+Release builds of the client are attached to each
+[GitHub release](https://github.com/Crank-Git/sourceknock/releases).
 
 ### NAT
 
@@ -213,11 +248,14 @@ Run it directly (needs root / `CAP_NET_RAW` for the raw socket and
 sudo ./sourceknock /path/to/sourceknock.conf
 ```
 
+With no argument it reads `/etc/sourceknock/sourceknock.conf`.
+
 ### systemd
 
-On systemd hosts, install the daemon and its units with `make install` (needs
-root). This places the binary in `/usr/local/bin` and the units in
-`/etc/systemd/system`, then reloads systemd:
+On systemd hosts, install with `make install` (needs root). This places the
+daemon and `sourceknock-knock` in `/usr/local/bin`, the man pages in
+`/usr/local/share/man/man1`, and the units in `/etc/systemd/system`, then
+reloads systemd:
 
 ```sh
 sudo make install
@@ -249,6 +287,15 @@ sudo systemctl disable --now sourceknock   # then:
 sudo make uninstall
 ```
 
+Stopping the daemon removes every allowed client but **leaves its nftables
+table in place**, so the service port stays closed (fail closed) until the
+daemon starts again. To open the port to everyone again after removing
+sourceknock, delete the table:
+
+```sh
+sudo nft delete table inet sourceknock_ssh   # one per [trigger:<service>]
+```
+
 ## IPv4 & IPv6
 
 `sourceknock` captures **both** IPv4 and IPv6 traffic. IPv6 source addresses are
@@ -274,25 +321,42 @@ are not decoded.
   resetting the knock, so clients whose knock packets get retransmitted (e.g.
   knocking with TCP `connect()`, whose SYNs are resent every ~1s) still work.
   Any other port mid-sequence resets it.
+- At most 4096 clients per trigger are tracked mid-knock at once; beyond that
+  the oldest in-progress knock is dropped. Clients that never send the first
+  knock port cost nothing.
 - Source ports are spoofable — this is obfuscation, not authentication.
 
 ## Troubleshooting
 
-### The daemon won't start / "capture open failed (need root?)"
+### The daemon won't start
 
-`AF_PACKET` raw sockets need root or `CAP_NET_RAW`, and programming nft rules
-needs `CAP_NET_ADMIN`. Run it as root, or under the systemd unit (which grants
-only those two capabilities to the unprivileged `sourceknock` user — see
-[Running](#running)). A plain `./sourceknock conf` without privileges fails at
-capture open.
+The daemon checks everything at startup and exits non-zero with a reason
+instead of running half-configured. Any nft table it already programmed is
+removed again, so a failed start leaves the host as it was.
+
+- **"capture open failed (need root?)"** — `AF_PACKET` raw sockets need root
+  or `CAP_NET_RAW`. Run it as root, or under the systemd unit (which grants
+  only `CAP_NET_RAW` + `CAP_NET_ADMIN` to the unprivileged `sourceknock` user —
+  see [Running](#running)).
+- **"cannot find interface"** — check `[global] interface =`.
+- **"has link type ... which sourceknock can't read knocks from"** — see the
+  supported interfaces under [Notes / limitations](#notes--limitations).
+- **"could not program nftables table"** — `nft` is missing, or the process
+  lacks `CAP_NET_ADMIN`, or an existing object in `inet sourceknock_<service>`
+  conflicts (delete that table and retry).
+- **"config error: ..."** — the message names the key or trigger; see
+  [Configuration](#configuration).
 
 ### The port never opens
 
 - **Wrong interface.** `[global] interface =` must be the daemon's capture
   interface (the one that sees the client's frames), not the client's.
 - **No knock seen.** The knock is encoded in the client's **source** port, not
-  the destination port. Verify the daemon logs `listening for knocks` and that
-  your client binds each probe to the right source port.
+  the destination port. Knock with `sourceknock-knock`, which binds each step
+  to the right source port. If the trigger sets `knock_port`, pass it with
+  `-p`. Each completed knock logs `knock OK from <ip>`; a wrong step logs
+  `progress reset`.
+- **NAT rewrote the source ports.** See [NAT](#nat).
 - **Sequence/window mismatch.** The ordered source-port sequence and the
   window must match between client and daemon. See the samples in
   [examples](examples) and the full field reference in the
@@ -321,8 +385,8 @@ sourceknock_<service>`), with separate `allowed_v4` / `allowed_v6` sets:
 nft list set inet sourceknock_ssh allowed_v4
 ```
 
-If a set never appears or the table is missing, the daemon likely failed to
-initialise reward (see above). `journalctl -u sourceknock` (or `-u
+If the table is missing, the daemon isn't running (it refuses to start rather
+than run without one; see above). `journalctl -u sourceknock` (or `-u
 sourceknock@<instance>`) shows the daemon's own logs.
 
 ### IPv6 notes
