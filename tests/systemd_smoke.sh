@@ -36,7 +36,9 @@ id sourceknock >/dev/null 2>&1 || useradd --system --user-group \
 # *warns* about unknown or removed directives (e.g. "Support for option
 # Capabilities= has been removed and it is ignored") and carries on.
 for u in sourceknock.service sourceknock@smoke.service; do
-  out="$(systemd-analyze verify "$u" 2>&1)"
+  # Only diagnostics about OUR unit files count; verify also reports on
+  # unrelated units the host ships (e.g. xfs_scrub on the GitHub runner).
+  out="$(systemd-analyze verify "$u" 2>&1 | grep -E 'sourceknock(@)?\.service')"
   if [ -n "$out" ]; then bad "$u: systemd-analyze verify: $out"; else ok "$u verifies cleanly"; fi
 done
 
