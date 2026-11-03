@@ -4,10 +4,6 @@
 #include <arpa/inet.h>
 #include <string.h>
 
-/* ARPHRD_ values we care about. */
-#define ARPHRD_ETHER 1
-#define ARPHRD_LOOPBACK 79
-
 /* EtherType / IPv6 next-header protocol numbers. */
 #define ETHERTYPE_IPV4 0x0800
 #define ETHERTYPE_IPV6 0x86DD
@@ -204,7 +200,53 @@ int pkt_is_control(const pkt_info_t *p)
            addr_is_mcast_or_bcast(p->family, &p->dst);
 }
 
-int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
+pkt_link_t pkt_link_kind(unsigned int hatype)
+{
+    switch (hatype)
+    {
+    case PKT_ARPHRD_ETHER:
+    case PKT_ARPHRD_LOOPBACK: /* Linux lo carries a 14-byte Ethernet header */
+        return PKT_LINK_ETHER;
+    case PKT_ARPHRD_NONE:
+    case PKT_ARPHRD_PPP:
+    case PKT_ARPHRD_RAWIP:
+    case PKT_ARPHRD_TUNNEL:
+    case PKT_ARPHRD_TUNNEL6:
+    case PKT_ARPHRD_SIT:
+        return PKT_LINK_RAWIP;
+    default:
+        return PKT_LINK_UNSUPPORTED;
+    }
+}
+
+const char *pkt_link_name(unsigned int hatype)
+{
+    switch (hatype)
+    {
+    case PKT_ARPHRD_ETHER:
+        return "ethernet";
+    case PKT_ARPHRD_LOOPBACK:
+        return "loopback";
+    case PKT_ARPHRD_NONE:
+        return "none (raw IP: tun/wireguard)";
+    case PKT_ARPHRD_PPP:
+        return "ppp";
+    case PKT_ARPHRD_RAWIP:
+        return "raw IP";
+    case PKT_ARPHRD_TUNNEL:
+        return "ipip tunnel";
+    case PKT_ARPHRD_TUNNEL6:
+        return "ip6 tunnel";
+    case PKT_ARPHRD_SIT:
+        return "sit tunnel";
+    case PKT_ARPHRD_IPGRE:
+        return "gre";
+    default:
+        return "unknown";
+    }
+}
+
+int pkt_parse(const unsigned char *buf, size_t len, unsigned int hatype,
               pkt_info_t *out)
 {
     if (!buf || !out)
@@ -213,16 +255,13 @@ int pkt_parse(const unsigned char *buf, size_t len, unsigned int link_type,
 
     /* --- locate the L3 header depending on link layer --- */
     size_t ip_off;
+    pkt_link_t kind = pkt_link_kind(hatype);
 
-    if (link_type == ARPHRD_LOOPBACK)
+    if (kind == PKT_LINK_UNSUPPORTED)
+        return 0;
+    if (kind == PKT_LINK_RAWIP)
     {
-        /* Linux lo: 2-byte BE protocol, then the L3 packet. */
-        uint16_t proto = be16(buf, len, 0);
-        if (proto != ETHERTYPE_IPV4 && proto != ETHERTYPE_IPV6)
-            return 0;
-        if (2 >= len)
-            return 0;
-        ip_off = 2;
+        ip_off = 0; /* no link header; the IP version nibble decides */
     }
     else
     {

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate libFuzzer seed corpus for fuzz_pkt_parse().
 
-Each seed is a raw frame. The first byte selects the link layer (0 ==
-ARPHRD_LOOPBACK, anything else == ARPHRD_ETHER); the rest is the frame body
-exactly as pkt_parse() sees it. Covers IPv4, IPv6, the IPv6 extension-header
-walk, both link layers, and malformed/truncated inputs.
+Each seed is a raw frame. The first byte selects the link layer (byte % 4:
+0 loopback, 1 Ethernet, 2 raw IP, 3 an unsupported type); the rest is the
+frame body exactly as pkt_parse() sees it. Covers IPv4, IPv6, the IPv6
+extension-header walk, every framing, and malformed/truncated inputs.
 
 Run from this directory:  python3 make_seeds.py
 """
@@ -14,7 +14,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "corpus", "pkt_parse")
 
 ETH = 0x01  # link-layer selector -> Ethernet-II
-LO  = 0x00  # link-layer selector -> loopback
+LO  = 0x00  # link-layer selector -> loopback (Linux lo: Ethernet framing)
+RAW = 0x02  # link-layer selector -> raw IP (tun/wireguard, no link header)
+GRE = 0x03  # link-layer selector -> unsupported link type (must reject)
 
 
 def be16(v):
@@ -95,8 +97,16 @@ def main():
                                                             bytes([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
                                                             hop + route + tcp(0x5555, 0x6666)))
 
-    # --- Loopback link layer (2-byte BE protocol prefix) ---
-    write("loopback_ipv4.eth", LO, be16(0x0800) + bytes(ipv4(6, sip=(127, 0, 0, 1))) + tcp(0x7777, 0x8888))
+    # --- Loopback (Linux lo carries a 14-byte Ethernet header) ---
+    write("loopback_ipv4.eth", LO, eth_header(0x0800) + bytes(ipv4(6, sip=(127, 0, 0, 1))) + tcp(0x7777, 0x8888))
+
+    # --- Raw IP links (no link header): tun/wireguard/ipip/ppp ---
+    write("raw_ipv4_udp.eth", RAW, bytes(ipv4(17, sip=(10, 30, 0, 1))) + udp(1100, 51820))
+    write("raw_ipv6_tcp.eth", RAW, ipv6(6, bytes([0xfd] + [0] * 14 + [1]), bytes([0xfd] + [0] * 14 + [2]),
+                                        tcp(0x2468, 22)))
+    write("raw_truncated.eth", RAW, b"\x45\x00")
+    # A valid frame on an unsupported link type must be rejected.
+    write("unsupported_link.eth", GRE, bytes(ipv4(17)) + udp(1, 2))
 
     # --- Malformed / truncated (must parse to 0, never crash) ---
     write("too_short.eth", ETH, b"\x00\x11")                       # < 14 bytes

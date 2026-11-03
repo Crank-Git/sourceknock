@@ -81,9 +81,12 @@ int main(int argc, char **argv)
         read_file(path, &data, &len);
         files++;
 
-        /* First byte is the link-layer selector; the rest is the frame. */
-        unsigned int link =
-            (len > 0 && data[0] == 0) ? ARPHRD_LOOPBACK : ARPHRD_ETHER;
+        /* First byte is the link-layer selector (same mapping as the fuzz
+         * target); the rest is the frame. */
+        static const unsigned int links[4] = {PKT_ARPHRD_LOOPBACK,
+                                              PKT_ARPHRD_ETHER, PKT_ARPHRD_NONE,
+                                              PKT_ARPHRD_IPGRE};
+        unsigned int link = links[(len > 0 ? data[0] : 1) % 4];
         const unsigned char *frame = (len > 0) ? data + 1 : data;
         size_t framelen = (len > 0) ? len - 1 : 0;
 

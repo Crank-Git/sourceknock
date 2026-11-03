@@ -59,6 +59,7 @@ cleanup() {
   sudo pkill -9 -f "$BIN" 2>/dev/null
   sudo ip addr del $CLIENT/24 dev e2e-c 2>/dev/null
   sudo ip link del e2e-c 2>/dev/null
+  sudo ip link del sktun0 2>/dev/null
   # tidy leftover state from a previous interrupted run
   sudo ip netns del e2etest 2>/dev/null
   sudo ip link del e2etest-c 2>/dev/null
@@ -305,6 +306,45 @@ oks="$(grep -c "knock OK" "$WORK/lo.log")"; resets="$(grep -c "progress reset" "
 if [ "$oks" = "1" ] && [ "$resets" = "0" ]; then check "loopback knock counted once (ok=$oks reset=$resets)" 1 1; else check "loopback knock counted once (ok=$oks reset=$resets)" 1 0; cat "$WORK/lo.log"; fi
 if sudo ip netns exec "$NS" nft list set inet sourceknock_loe2e allowed_v4 | grep -q 127.0.0.1; then check "loopback knock opens" 1 1; else check "loopback knock opens" 1 0; fi
 sudo kill -TERM "$LO_PID" 2>/dev/null; sudo pkill -TERM -f "$WORK/lo.conf"; wait "$LO_PID" 2>/dev/null
+
+# Raw-IP links (no Ethernet header): an ipip tunnel over the veth. Frames on
+# it start at the IP header; parsing them as Ethernet never matched a knock.
+echo "--- knock over an ipip tunnel (raw IP link) ---"
+sudo ip link add sktun0 type ipip local "$CLIENT" remote "$SERVER"
+sudo ip addr add 10.30.0.1/30 dev sktun0
+sudo ip link set sktun0 up
+sudo ip netns exec "$NS" ip link add sktun0 type ipip local "$SERVER" remote "$CLIENT"
+sudo ip netns exec "$NS" ip addr add 10.30.0.2/30 dev sktun0
+sudo ip netns exec "$NS" ip link set sktun0 up
+TUN_PORT=$((PORT+9))
+printf '[global]\ninterface = sktun0\n[trigger:tune2e]\nport = %s\nsequence = %s\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$TUN_PORT" "$SEQ" > "$WORK/tun.conf"
+sudo ip netns exec "$NS" setsid "$BIN" "$WORK/tun.conf" >"$WORK/tun.log" 2>&1 </dev/null &
+TUN_PID=$!
+for _ in $(seq 1 50); do grep -q "listening for knocks" "$WORK/tun.log" && break; sleep 0.1; done
+grep -q "link ipip tunnel" "$WORK/tun.log" && check "tunnel link type detected" 1 1 || { check "tunnel link type detected" 1 0; cat "$WORK/tun.log"; }
+python3 "$DRIVER" knock 10.30.0.1 10.30.0.2 0.05 "$SEQ" "$TUN_PORT"
+sleep 0.5
+if sudo ip netns exec "$NS" nft list set inet sourceknock_tune2e allowed_v4 2>/dev/null | grep -q 10.30.0.1; then
+  check "knock over ipip tunnel opens" 1 1
+else
+  check "knock over ipip tunnel opens" 1 0; cat "$WORK/tun.log"
+fi
+sudo kill -TERM "$TUN_PID" 2>/dev/null; sudo pkill -TERM -f "$WORK/tun.conf"; wait "$TUN_PID" 2>/dev/null
+
+# A link type we can't parse is refused at startup (multipoint GRE puts its
+# outer header in front of each frame), not run and silently never matched.
+echo "--- unsupported link type (gre) is refused ---"
+sudo ip netns exec "$NS" ip link add skgre0 type gre local "$SERVER"
+sudo ip netns exec "$NS" ip link set skgre0 up
+sed 's/^interface = .*/interface = skgre0/' "$CONF" > "$WORK/gre.conf"
+sed -i 's/^\[trigger:.*\]/[trigger:gree2e]/; s/^service = .*/service = gree2e/' "$WORK/gre.conf"
+sudo ip netns exec "$NS" timeout 10 "$BIN" "$WORK/gre.conf" >"$WORK/gre.log" 2>&1 </dev/null; rc=$?
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && grep -q "can't read knocks from" "$WORK/gre.log"; then
+  check "gre link refused with a reason (exit $rc)" 1 1
+else
+  check "gre link refused with a reason (exit $rc)" 1 0; cat "$WORK/gre.log"
+fi
+sudo ip netns exec "$NS" ip link del skgre0
 
 # Log timestamps are wall-clock time (not time since boot).
 echo "--- log timestamps ---"
