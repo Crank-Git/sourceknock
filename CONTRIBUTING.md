@@ -1,9 +1,9 @@
 # Contributing to sourceknock
 
 Thanks for caring about this project. This guide covers building, testing,
-formatting, fuzzing, and the branch/PR workflow. For the threat model,
-configuration reference, and running/operating instructions, see the
-[README](README.md).
+formatting, fuzzing, CI, releases, and the branch/PR workflow. For the threat
+model, see the [README](README.md). The configuration reference and the
+running/operating instructions are in [docs/](docs/).
 
 ## Requirements
 
@@ -135,3 +135,56 @@ if it finds a crash. The CI fuzz run is a bounded, Linux-only job.
 If you add a sample under `examples/`, make sure it parses: the daemon loads it
 at startup (`config_parse_file`), and `make test`'s `config_test` exercises the
 parser. A malformed example will fail the daemon's own startup check.
+
+## Layout
+
+| File | Purpose |
+|------|---------|
+| `src/state.c`   | Pure knock-sequence state machine (no OS deps), bounded client table |
+| `src/packet.c`  | Parse Ethernet / raw-IP frames (IPv4, IPv6) into (src IP, sport, dport, proto) |
+| `src/config.c`  | INI-style config parser and validation (knockd-flavored) |
+| `src/close.c`   | Pure per-packet decisions: does a frame count toward a knock (`knock_port`), does it close a `close_on_connect` port |
+| `src/capture.c` | `AF_PACKET` raw-socket capture (Linux): link-type detection, received frames only |
+| `src/reward.c`  | nftables management: open/close the service port for a client IP |
+| `src/sourceknock.c` | Daemon: wires capture -> state machine -> reward |
+| `src/knock.c`   | `sourceknock-knock`, the client that sends a knock (Linux/macOS) |
+| `tests/`        | Unit tests (any OS), knock-client tests, e2e and systemd tests (Linux + root), fuzz target |
+| `contrib/systemd/` | `sourceknock.service` and the `sourceknock@.service` template |
+| `man/`          | `sourceknock(1)`, `sourceknock-knock(1)` |
+| `examples/`     | Sample configs (SSH, web, WireGuard) |
+
+The core (state machine, packet parsing, config, per-packet decisions) is
+deliberately free of socket code so it unit-tests anywhere. The Linux-only
+layers (`AF_PACKET`, nftables) live in `capture.c` / `reward.c`.
+
+## Continuous integration
+
+CI runs on every push and pull request (GitHub Actions):
+
+- **Unit + client tests** (`make test`) on Linux and macOS.
+- **Sanitizers** (`make test-asan`: ASan + LeakSanitizer + UBSan) on Linux.
+- **Daemon + client build** and a bounded **libFuzzer** run on the packet
+  parser, on Linux.
+- **End-to-end tests** on Linux: the real daemon in a network namespace with
+  real nftables, in both `fixed_ttl` and `close_on_connect` modes (knock/open/
+  close, long-lived sessions surviving the close, what scans see, startup
+  failures, many clients, loopback and ipip links, `knock_port`, shutdown).
+- **systemd units**: installs and starts both units on the runner and checks
+  they run unprivileged with only `CAP_NET_RAW` + `CAP_NET_ADMIN`.
+- **Format / lint / secrets**: clang-format, clang-tidy (advisory), gitleaks.
+
+Workflow definitions live in `.github/workflows/`.
+
+## Releases
+
+Cut a release by pushing a `v*` tag on `main`. CI runs the tests, builds the
+Linux daemon and knock client, and publishes both as GitHub Release
+artifacts:
+
+```sh
+git tag -a v1.1.0 -m "sourceknock 1.1.0"
+git push origin v1.1.0
+```
+
+The release attaches `sourceknock` and `sourceknock-knock` built on
+`ubuntu-latest` (x86-64 Linux). On macOS, build the client with `make client`.
