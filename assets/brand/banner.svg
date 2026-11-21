@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 250" role="img" aria-labelledby="title">
+  <title id="title">sourceknock: a terminal capturing UDP to port 9 on loopback while sourceknock-knock 127.0.0.1 7000,8000,9000 runs; the capture shows three datagrams from source ports 7000, 8000 and 9000.</title>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 19px; }
+    .name { font-size: 50px; font-weight: 700; fill: #e6edf3; }
+    .sub { fill: #8b949e; font-size: 21px; }
+    .prompt { fill: #7ee787; }
+    .cmd { fill: #e6edf3; }
+    .muted { fill: #8b949e; }
+    .answer { fill: #ffa657; }
+    .cursor { fill: #7ee787; animation: blink 1.2s steps(2, start) infinite; }
+    @keyframes blink { to { visibility: hidden; } }
+    @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+  </style>
+  <rect x="1" y="1" width="898" height="248" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+  <text class="name" x="36" y="58">sourceknock</text>
+  <text class="sub" x="400" y="56">the knock is in the source port</text>
+  <text x="36" y="98"><tspan class="prompt">$ </tspan><tspan class="cmd">tcpdump -tqni lo0 -c3 udp and dst port 9 2&gt;/dev/null &amp;</tspan></text>
+  <text class="muted" x="36" y="120">[1] 26769</text>
+  <text x="36" y="142"><tspan class="prompt">$ </tspan><tspan class="cmd">sourceknock-knock 127.0.0.1 7000,8000,9000; wait</tspan></text>
+  <text class="answer" x="36" y="164">IP 127.0.0.1.7000 &gt; 127.0.0.1.9: UDP, length 1</text>
+  <text class="answer" x="36" y="186">IP 127.0.0.1.8000 &gt; 127.0.0.1.9: UDP, length 1</text>
+  <text class="answer" x="36" y="208">IP 127.0.0.1.9000 &gt; 127.0.0.1.9: UDP, length 1</text>
+  <text class="prompt" x="36" y="232">$</text>
+  <rect class="cursor" x="58" y="216" width="11" height="20"/>
+</svg>
