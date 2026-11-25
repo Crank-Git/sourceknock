@@ -250,6 +250,15 @@ int config_weak_sequence(const trigger_t *tr, char *msg, size_t msglen)
     return 0;
 }
 
+size_t config_keep_up_interfaces(const char **names, const int *up, size_t n)
+{
+    size_t kept = 0;
+    for (size_t i = 0; i < n; i++)
+        if (up[i])
+            names[kept++] = names[i];
+    return kept;
+}
+
 int config_open_interfaces_warning(const trigger_t *tr,
                                    const char *const *ifaces, size_t n,
                                    char *msg, size_t msglen)
