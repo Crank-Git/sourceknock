@@ -9,14 +9,17 @@
 #define SOURCEKNOCK_CLOSE_H
 
 #include "config.h"
+#include "packet.h"
 #include "state.h"
 #include <stddef.h>
 #include <stdint.h>
 
-/* Does a captured frame to `dport` count toward this trigger's knock (primary
- * and admin sequences)? Always, unless the trigger sets knock_port, in which
- * case only frames sent to that destination port do. */
-int knock_counts(const trigger_t *tr, uint16_t dport);
+/* Does a captured frame count toward this trigger's knock (primary and admin
+ * sequences)? Never for a TCP segment with ACK set and SYN clear: it belongs
+ * to a flow that is already open, and a TCP knock is a SYN. Otherwise always,
+ * unless the trigger sets knock_port, in which case only frames sent to that
+ * destination port do. */
+int knock_counts(const trigger_t *tr, const pkt_info_t *pkt);
 
 /* Is `port` one of the trigger's service ports? */
 int port_in_list(const trigger_t *tr, uint16_t port);

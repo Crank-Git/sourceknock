@@ -236,16 +236,11 @@ if [ "$MODE" = "close_on_connect" ]; then
   sleep 0.3
   if probe; then check "post-connect closed" 0 1; else check "post-connect closed" 0 0; fi
 
-  # The checks below keep sessions open while they knock. Without knock_port,
-  # every frame from the client counts toward the knock, so the data frames of
-  # a busy session can land between two knock packets and reset it (#73). From
-  # here the trigger sets knock_port and the knocks go to that port, which no
-  # session uses. The limit is in docs/configuration.md.
+  # The checks below keep sessions open while they knock. The trigger sets no
+  # knock_port: the ACK segments of an open session don't count toward a knock
+  # (#75), so they can't reset it. The knocks go to a port no session uses, so
+  # in close_on_connect mode a re-knock can't close the port.
   KPORT=4446
-  { cat "$CONF"; printf 'knock_port = %s\n' "$KPORT"; } > "$WORK/close_kp.conf"
-  sudo kill -TERM "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null
-  RUNCONF="$WORK/close_kp.conf"
-  start_daemon || { echo "FAIL knock_port daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); }
 
   # Closing the port must only stop NEW connections: a session opened by the
   # knock keeps exchanging data after the port closes behind it.

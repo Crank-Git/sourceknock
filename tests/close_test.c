@@ -101,22 +101,41 @@ static void test_knock_counts(void)
 {
     uint16_t ports[] = {22};
     trigger_t tr = make_trigger(MODE_FIXED_TTL, ports, 1);
-    CHECK(knock_counts(&tr, 0));
-    CHECK(knock_counts(&tr, 22));
-    CHECK(knock_counts(&tr, 4444));
-    CHECK(knock_counts(&tr, 65535));
+    CHECK(knock_counts(&tr, udp(0)));
+    CHECK(knock_counts(&tr, udp(22)));
+    CHECK(knock_counts(&tr, udp(4444)));
+    CHECK(knock_counts(&tr, udp(65535)));
 
     tr.knock_port = 4444;
-    CHECK(knock_counts(&tr, 4444));
-    CHECK(!knock_counts(&tr, 22)); /* not even the service port */
-    CHECK(!knock_counts(&tr, 0));
-    CHECK(!knock_counts(&tr, 4443));
-    CHECK(!knock_counts(&tr, 4445));
-    CHECK(!knock_counts(&tr, 65535));
+    CHECK(knock_counts(&tr, udp(4444)));
+    CHECK(!knock_counts(&tr, udp(22))); /* not even the service port */
+    CHECK(!knock_counts(&tr, udp(0)));
+    CHECK(!knock_counts(&tr, udp(4443)));
+    CHECK(!knock_counts(&tr, udp(4445)));
+    CHECK(!knock_counts(&tr, udp(65535)));
 
     /* the close decision is independent of knock_port */
     tr.mode = MODE_CLOSE_ON_CONNECT;
     CHECK(should_close(&tr, 1, udp(22), KNOCK_IGNORE));
+}
+
+/* issue #75: a TCP segment with ACK set and SYN clear belongs to a flow that
+ * is already open, so it never counts toward a knock. */
+static void test_knock_counts_tcp_flags(void)
+{
+    uint16_t ports[] = {22};
+    trigger_t tr = make_trigger(MODE_FIXED_TTL, ports, 1);
+    CHECK(!knock_counts(&tr, pkt(PROTO_TCP, 22, PKT_TCP_ACK)));
+    CHECK(!knock_counts(&tr, pkt(PROTO_TCP, 22, PKT_TCP_ACK | 0x08))); /* PSH */
+    CHECK(!knock_counts(&tr, pkt(PROTO_TCP, 22, PKT_TCP_SYN | PKT_TCP_ACK)));
+    CHECK(knock_counts(&tr, pkt(PROTO_TCP, 22, PKT_TCP_SYN)));
+    CHECK(knock_counts(&tr, udp(22)));
+
+    /* knock_port rules still apply to a SYN */
+    tr.knock_port = 4444;
+    CHECK(knock_counts(&tr, pkt(PROTO_TCP, 4444, PKT_TCP_SYN)));
+    CHECK(!knock_counts(&tr, pkt(PROTO_TCP, 22, PKT_TCP_SYN)));
+    CHECK(!knock_counts(&tr, pkt(PROTO_TCP, 4444, PKT_TCP_ACK)));
 }
 
 int main(void)
@@ -129,5 +148,6 @@ int main(void)
     TEST_RUN(test_tcp_only_syn_closes);
     TEST_RUN(test_port_in_list);
     TEST_RUN(test_knock_counts);
+    TEST_RUN(test_knock_counts_tcp_flags);
     TEST_SUMMARY();
 }

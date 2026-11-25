@@ -298,11 +298,11 @@ static void on_packet(const pkt_info_t *pkt, const char *iface, double ts,
         if (strcmp(t->tr->interface, iface) != 0)
             continue;
 
-        /* With knock_port set, only frames sent to that port are part of a
-         * knock; anything else (other traffic from the same client, replies
-         * to the server's own outbound connections) can't advance or reset
-         * it. */
-        if (knock_counts(t->tr, pkt->dport) && t->rolling)
+        /* Segments of an open TCP flow never count. With knock_port set,
+         * only frames sent to that port are part of a knock; anything else
+         * (other traffic from the same client, replies to the server's own
+         * outbound connections) can't advance or reset it. */
+        if (knock_counts(t->tr, pkt) && t->rolling)
         {
             long step = totp_step((long)time(NULL));
             int replay;
@@ -318,7 +318,7 @@ static void on_packet(const pkt_info_t *pkt, const char *iface, double ts,
             rolling_feed(&t->roll_revoke, step, pkt->family, &pkt->addr,
                          pkt->sport, ts, &replay);
         }
-        else if (knock_counts(t->tr, pkt->dport))
+        else if (knock_counts(t->tr, pkt))
         {
             r = kn_feed(t->ctx, pkt->family, &pkt->addr, pkt->sport, ts);
             if (r == KNOCK_RESET)

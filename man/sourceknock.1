@@ -144,9 +144,10 @@ mode; when it completes the client's IP is removed and the port closes again.
 Optional destination port. When set, only frames sent to this port count
 toward the knock, so other traffic from the client (or replies to the
 server's own outbound connections) can neither advance nor reset it. Pick a
-port nothing listens on and that is not a service port. Set it when a client
-can have a busy session open while it knocks: without it, that session's
-frames can arrive between two knock packets and reset the knock at random.
+port nothing listens on and that is not a service port. TCP segments of a flow that is
+already open (ACK set, SYN clear) never count toward a knock. UDP traffic from
+the same client, for example a WireGuard or QUIC flow, still does, so set it
+when a client can have such a flow open while it knocks.
 .IP \(bu 2
 .B secret_file
 Instead of
