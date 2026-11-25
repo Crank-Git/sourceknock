@@ -119,8 +119,16 @@ secret and the clock, like a 2FA code:
   every knock fail.
 - Each step's sequence opens the port **once**. Repeating it, from any
   address, is refused and logged ("already used"), so a knock someone sees
-  can't be replayed. If you knock twice within 30 seconds, the second one is
-  refused; wait for the next step.
+  can't be replayed.
+- `sourceknock-knock -K` records the last step it sent for each key file and
+  host in `$XDG_STATE_HOME/sourceknock/` (default
+  `~/.local/state/sourceknock/`, files mode 0600). When the current step is
+  used, it sends the next step, so you can knock twice within 30 seconds. A
+  third knock in that time exits with status 1 and prints how many seconds to
+  wait. If the record cannot be read or written, the client prints one
+  warning and knocks with the current step.
+- The record is local to one client. Two clients that share a secret do not
+  share it, so they can send the same step; the daemon refuses the second.
 - The revoke knock is derived from the same secret (`sourceknock-knock -K
   FILE -r`); `admin_sequence` can't be combined with `secret_file`.
 
