@@ -157,7 +157,7 @@ wait_file "$WORK/pre_up" || echo "pre-start hold never connected"
 
 start_daemon() { # [conf]
   : > "$LOG"
-  sudo ip netns exec "$NS" setsid "$BIN" "${1:-$CONF}" >"$LOG" 2>&1 </dev/null &
+  sudo ip netns exec "$NS" setsid "$BIN" "${1:-${RUNCONF:-$CONF}}" >"$LOG" 2>&1 </dev/null &
   DAEMON_PID=$!
   for _ in $(seq 1 50); do grep -q "listening for knocks" "$LOG" 2>/dev/null && return 0; sleep 0.1; done
   return 1
@@ -232,10 +232,21 @@ if [ "$MODE" = "close_on_connect" ]; then
   sleep 0.3
   if probe; then check "post-connect closed" 0 1; else check "post-connect closed" 0 0; fi
 
+  # The checks below keep sessions open while they knock. Without knock_port,
+  # every frame from the client counts toward the knock, so the data frames of
+  # a busy session can land between two knock packets and reset it (#73). From
+  # here the trigger sets knock_port and the knocks go to that port, which no
+  # session uses. The limit is in docs/configuration.md.
+  KPORT=4446
+  { cat "$CONF"; printf 'knock_port = %s\n' "$KPORT"; } > "$WORK/close_kp.conf"
+  sudo kill -TERM "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null
+  RUNCONF="$WORK/close_kp.conf"
+  start_daemon || { echo "FAIL knock_port daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); }
+
   # Closing the port must only stop NEW connections: a session opened by the
   # knock keeps exchanging data after the port closes behind it.
   echo "--- knock again, hold a session open past the close (expect it to survive) ---"
-  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$KPORT" "$SERVER" "$SEQ"
   sleep 0.5
   python3 "$DRIVER" hold "$SERVER" "$PORT" 3 >"$WORK/hold.log" 2>&1 &
   HOLD=$!
@@ -246,13 +257,13 @@ if [ "$MODE" = "close_on_connect" ]; then
   # Traffic of a session that is already open must not close a port opened by
   # a later knock: only a new connection's SYN does.
   echo "--- knock while a session is open (expect its traffic not to close the port) ---"
-  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$KPORT" "$SERVER" "$SEQ"
   sleep 0.5
   rm -f "$WORK/busy_up"
   python3 "$DRIVER" hold "$SERVER" "$PORT" 4 "$WORK/busy_up" >"$WORK/busy.log" 2>&1 &
   BUSY=$!
   wait_file "$WORK/busy_up" || echo "busy session never connected"
-  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$KPORT" "$SERVER" "$SEQ"
   sleep 1 # the open session keeps sending meanwhile
   if probe; then check "open session's traffic doesn't close the port" 1 1; else check "open session's traffic doesn't close the port" 1 0; fi
   if wait $BUSY; then check "busy session survives" 1 1; else check "busy session survives" 1 0; cat "$WORK/busy.log"; fi
@@ -260,13 +271,13 @@ if [ "$MODE" = "close_on_connect" ]; then
   # fallback_ttl must be enforced by the kernel, not by the daemon noticing a
   # later packet: knock, then send NOTHING to the server until it has passed.
   echo "--- knock, stay silent for fallback_ttl=${FALLBACK}s (expect closed) ---"
-  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$KPORT" "$SERVER" "$SEQ"
   sleep $((FALLBACK+1))
   if probe; then check "fallback_ttl closes on a quiet interface" 0 1; else check "fallback_ttl closes on a quiet interface" 0 0; fi
 
   # ...and must still hold if the daemon dies right after arming the port.
   echo "--- knock, SIGKILL the daemon, wait fallback_ttl (expect closed) ---"
-  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$KPORT" "$SERVER" "$SEQ"
   sleep 0.5
   sudo pkill -9 -x sourceknock
   sleep $((FALLBACK+1))
@@ -281,7 +292,7 @@ if [ "$MODE" = "close_on_connect" ]; then
   # Each client knocks in order; the clients run concurrently so all of them
   # are armed well inside fallback_ttl.
   KPIDS=()
-  for i in $(seq 1 $MANY); do "$KNOCK" -s "10.20.0.$((99+i))" -d 50 -p "$PORT" "$SERVER" "$SEQ" & KPIDS+=($!); done
+  for i in $(seq 1 $MANY); do "$KNOCK" -s "10.20.0.$((99+i))" -d 50 -p "$KPORT" "$SERVER" "$SEQ" & KPIDS+=($!); done
   wait "${KPIDS[@]}"
   allowed() { sudo ip netns exec "$NS" nft list set inet "sourceknock_$SERVICE" allowed_v4 | grep -oE '10\.20\.0\.1[0-9][0-9]' | sort -u | wc -l | tr -d ' '; }
   # The daemon runs nft twice per knock, so 70 at once take a few seconds to
