@@ -500,7 +500,7 @@ printf 'e2e-wrong-secret-%s\n' "$$" > "$WORK/bad.key"
 TOTP_PORT=$((PORT+17))
 totp_conf() { # [extra trigger name]
   cat "$CONF"
-  printf '\n[trigger:totpe2e]\nsecret_file = %s  # comment after a value\nport = %s\nknock_port = 4445\nwindow = 5\nmode = fixed_ttl\nduration = 60\nmax_allowed = 512\n' "$WORK/good.key" "$TOTP_PORT"
+  printf '\n[trigger:totpe2e]\nsecret_file = %s  # comment after a value\nport = %s\nknock_port = 4445\nwindow = 5\nmode = fixed_ttl\nduration = 60\nmax_allowed = %s\n' "$WORK/good.key" "$TOTP_PORT" "${TOTP_MAX:-512}"
   [ -n "${1:-}" ] && printf '[trigger:%s]\nport = %s\nsequence = 4100,4200,4300\n' "$1" "$((PORT+19))"
 }
 totp_conf > "$WORK/totp.conf"
@@ -525,12 +525,13 @@ grep -q "already used" "$LOG" && check "replay logged" 1 1 || check "replay logg
 echo "--- reload (SIGHUP) ---"
 sudo ip netns exec "$NS" nft add element inet sourceknock_totpe2e allowed_v4 "{ $CLIENT timeout 300s }"
 cp "$WORK/totp.conf" "$WORK/totp.conf.orig"
-totp_conf newe2e > "$WORK/totp.conf"
+TOTP_MAX=1024 totp_conf newe2e > "$WORK/totp.conf"
 sudo pkill -HUP -x sourceknock
 for _ in $(seq 1 50); do grep -q "reload: applied" "$LOG" && break; sleep 0.1; done
 grep -q "reload: applied (3 trigger(s))" "$LOG" && check "reload applies a new config" 1 1 || { check "reload applies a new config" 1 0; tail -8 "$LOG"; }
 sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_newe2e && check "reload adds the new trigger's table" 1 1 || check "reload adds the new trigger's table" 1 0
 totp_set | grep -q "$CLIENT" && check "reload keeps clients already let in" 1 1 || check "reload keeps clients already let in" 1 0
+totp_set | grep -q "size 1024" && check "reload resizes the sets to the new max_allowed" 1 1 || { check "reload resizes the sets to the new max_allowed" 1 0; totp_set; }
 printf '[trigger:broken]\nport = 22\n' > "$WORK/totp.conf"
 sudo pkill -HUP -x sourceknock
 for _ in $(seq 1 50); do grep -q "keeping the running config" "$LOG" && break; sleep 0.1; done

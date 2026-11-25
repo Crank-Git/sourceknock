@@ -42,7 +42,7 @@ CORE_OBJ:= $(SRC:.c=.o)
 DAEMON_SRC := src/sourceknock.c src/capture.c src/reward.c $(SRC)
 DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
-TESTS := state_test packet_test config_test close_test totp_test rolling_test retry_test
+TESTS := state_test packet_test config_test close_test totp_test rolling_test retry_test reward_test
 
 # The knock client is plain POSIX, so it builds anywhere.
 CLIENT := sourceknock-knock
@@ -134,6 +134,8 @@ totp_test: tests/totp_test.o src/totp.o
 rolling_test: tests/rolling_test.o src/rolling.o src/state.o src/totp.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 retry_test: tests/retry_test.o src/retry.o
+	$(CC) $^ -o $@ $(LDFLAGS)
+reward_test: tests/reward_test.o src/reward.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 
 # ---- fuzzing (Linux only) ----
