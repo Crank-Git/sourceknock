@@ -35,14 +35,14 @@ ifeq ($(OS),Darwin)
   endif
 endif
 
-SRC     := src/state.c src/packet.c src/config.c src/close.c src/totp.c src/rolling.c
+SRC     := src/state.c src/packet.c src/config.c src/close.c src/totp.c src/rolling.c src/retry.c
 CORE_OBJ:= $(SRC:.c=.o)
 
 # Daemon links Linux-only capture/reward layers.
 DAEMON_SRC := src/sourceknock.c src/capture.c src/reward.c $(SRC)
 DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
-TESTS := state_test packet_test config_test close_test totp_test rolling_test
+TESTS := state_test packet_test config_test close_test totp_test rolling_test retry_test
 
 # The knock client is plain POSIX, so it builds anywhere.
 CLIENT := sourceknock-knock
@@ -132,6 +132,8 @@ close_test: tests/close_test.o src/close.o
 totp_test: tests/totp_test.o src/totp.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 rolling_test: tests/rolling_test.o src/rolling.o src/state.o src/totp.o
+	$(CC) $^ -o $@ $(LDFLAGS)
+retry_test: tests/retry_test.o src/retry.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 
 # ---- fuzzing (Linux only) ----

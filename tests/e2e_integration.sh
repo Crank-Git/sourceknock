@@ -440,6 +440,29 @@ in_set kpe2e && check "knock_port: reply-shaped traffic ignored" 0 1 || check "k
 echo "--- capture interface goes down and comes back ---"
 sudo ip netns exec "$NS" ip link set e2e-s down; sleep 2
 if kill -0 "$DAEMON_PID" 2>/dev/null; then check "daemon survives its interface going down" 1 1; else check "daemon survives its interface going down" 1 0; tail -5 "$LOG"; fi
+# While e2e-s is down the daemon retries it once a second, not once per packet
+# on its other interfaces: flood lo and count the AF_PACKET sockets it opens.
+if command -v strace >/dev/null 2>&1; then
+  SKPID="$(pgrep -x sourceknock | head -1)"
+  sudo strace -f -e trace=socket -o "$WORK/strace.out" -p "$SKPID" >/dev/null 2>&1 &
+  STRACE_PID=$!
+  sleep 0.5
+  sudo ip netns exec "$NS" python3 -c "
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+t = time.time()
+n = 0
+while time.time() - t < 2.0:
+    s.sendto(b'x', ('127.0.0.1', 9))
+    n += 1
+    time.sleep(0.002)
+"
+  sudo kill -TERM "$STRACE_PID" 2>/dev/null; wait "$STRACE_PID" 2>/dev/null
+  REOPENS="$(grep -c 'AF_PACKET' "$WORK/strace.out" 2>/dev/null)"
+  if [ "${REOPENS:-99}" -le 4 ]; then check "lost interface is retried about once a second, not per packet (reopens=$REOPENS)" 1 1; else check "lost interface is retried about once a second, not per packet (reopens=$REOPENS)" 1 0; fi
+else
+  echo "SKIP  reopen throttle check (strace not installed)"
+fi
 sudo ip netns exec "$NS" ip link set e2e-s up
 sudo ip netns exec "$NS" ip addr add $SERVER/24 dev e2e-s 2>/dev/null
 for _ in $(seq 1 50); do grep -q "'e2e-s' is up" "$LOG" && break; sleep 0.1; done

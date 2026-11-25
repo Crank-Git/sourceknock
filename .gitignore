@@ -9,6 +9,7 @@
 /close_test
 /totp_test
 /rolling_test
+/retry_test
 /sourceknock-knock
 /tests/*.o
 # instrumented / debug builds
