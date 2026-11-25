@@ -39,8 +39,18 @@ typedef struct
     int initialized;
 } reward_t;
 
-/* Create table/set/chain if missing. Idempotent. Returns 0 on success; if any
- * nft command fails it removes the table again and returns -1.
+/* Write the nft script that programs one trigger's table into `buf`: the
+ * table, both sets, the chain and every rule, one command per line. Returns 0,
+ * or -1 when `len` is too small (the script is never truncated silently).
+ * `reward_init` feeds this script to `nft -f -`, so nft applies it as one
+ * transaction. It is public so tests can check the exact text. */
+int reward_script(char *buf, size_t len, const char *table, const char *iface,
+                  const uint16_t *ports, size_t n_ports, proto_t proto,
+                  long max_allowed);
+
+/* Create table/set/chain if missing. Idempotent. Returns 0 on success. nft
+ * applies the table in one transaction; if it fails, nothing is programmed,
+ * the table is removed again and the call returns -1.
  * `table` is the full nft table name (e.g. "inet sourceknock_ssh"); callers
  * must give each trigger a distinct name so multiple triggers don't clobber
  * each other's rules. The drop rules match only packets arriving on `iface`.

@@ -5,6 +5,8 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +108,164 @@ static const char *proto_str(proto_t proto)
     return proto == PROTO_UDP ? "udp" : "tcp";
 }
 
+/* Append printf-style text at buf[*used]. Returns -1 when it does not fit. */
+static int emit(char *buf, size_t len, size_t *used, const char *fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+static int emit(char *buf, size_t len, size_t *used, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *used, len - *used, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= len - *used)
+        return -1;
+    *used += (size_t)n;
+    return 0;
+}
+
+int reward_script(char *buf, size_t len, const char *table, const char *iface,
+                  const uint16_t *ports, size_t n_ports, proto_t proto,
+                  long max_allowed)
+{
+    if (len == 0)
+        return -1;
+    buf[0] = '\0';
+    size_t u = 0;
+    const char *chain = "service";
+    const char *v4 = "allowed_v4";
+    const char *v6 = "allowed_v6";
+    int bad = 0; /* any emit() that did not fit */
+
+    /* `add` is idempotent for an identical table/set/chain, so only a real
+     * conflict fails the transaction. */
+    bad |= emit(buf, len, &u, "add table %s\n", table);
+
+    /* Per-family allowed sets (per-element timeout). */
+    bad |= emit(buf, len, &u,
+                "add set %s %s { type ipv4_addr; flags timeout; size %ld; }\n",
+                table, v4, max_allowed);
+    bad |= emit(buf, len, &u,
+                "add set %s %s { type ipv6_addr; flags timeout; size %ld; }\n",
+                table, v6, max_allowed);
+
+    /* Base chain, policy accept so other traffic is unaffected. */
+    bad |= emit(buf, len, &u,
+                "add chain %s %s { type filter hook input priority 0; policy "
+                "accept; }\n",
+                table, chain);
+
+    /* Clear any prior rules (idempotent re-init). */
+    bad |= emit(buf, len, &u, "flush chain %s %s\n", table, chain);
+
+    /* Let established flows through before any drop rule. A drop in any base
+     * chain is final in nftables (an accept elsewhere can't override it), so
+     * without this, removing an IP from the allowed set - TTL expiry, close on
+     * connect, admin revoke - and even starting the daemon would cut sessions
+     * that are already open. Only NEW connections are gated by the knock. */
+    bad |= emit(buf, len, &u,
+                "add rule %s %s ct state established,related accept\n", table,
+                chain);
+
+    /* One accept (per family) + one drop rule per service port. The drop rule
+     * matches both families in an inet table. Adding an IP to the allowed set
+     * opens every port, since each accept rule references that set. */
+    for (size_t i = 0; i < n_ports; i++)
+    {
+        unsigned port = ports[i];
+        bad |= emit(buf, len, &u,
+                    "add rule %s %s ip saddr @%s %s dport %u accept\n", table,
+                    chain, v4, proto_str(proto), port);
+        bad |= emit(buf, len, &u,
+                    "add rule %s %s ip6 saddr @%s %s dport %u accept\n", table,
+                    chain, v6, proto_str(proto), port);
+
+        /* TCP sessions that were open before conntrack started tracking them
+         * (e.g. the admin's SSH session when the daemon first starts on a host
+         * with no other stateful firewall) show up as ct state "new" on their
+         * first mid-stream packet. Accept segments that carry ACK but not SYN:
+         * they can never open a connection (that needs a SYN), and a stray ACK
+         * gets a RST whether or not the port is open, so this leaks nothing to
+         * a scanner. Once accepted, conntrack picks the flow up. */
+        if (proto == PROTO_TCP)
+            bad |= emit(buf, len, &u,
+                        "add rule %s %s tcp dport %u tcp flags & (syn | ack) "
+                        "== ack accept\n",
+                        table, chain, port);
+
+        /* Only on the trigger's own interface: other interfaces (a VPN,
+         * loopback) are left alone, so they never lock anyone out. */
+        bad |= emit(buf, len, &u,
+                    "add rule %s %s iifname \"%s\" %s dport %u drop\n", table,
+                    chain, iface, proto_str(proto), port);
+    }
+    return bad ? -1 : 0;
+}
+
+/* Feed `script` to `nft -f -` on stdin. nft applies the whole script as one
+ * netlink transaction: it either all takes effect or none of it does, so a
+ * failure never leaves a drop rule without its accept rules. Returns 0 on nft
+ * exit 0. */
+static int run_nft_script(const char *script)
+{
+    int fds[2];
+    if (pipe(fds) < 0)
+    {
+        fprintf(stderr, "reward: pipe(): %s\n", strerror(errno));
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        close(fds[1]);
+        if (dup2(fds[0], STDIN_FILENO) < 0)
+            _exit(127);
+        close(fds[0]);
+        /* Same pinned PATH as run_nft(). */
+        setenv("PATH", "/usr/sbin:/sbin:/usr/bin:/bin", 1);
+        execlp("nft", "nft", "-f", "-", (char *)NULL);
+        fprintf(stderr, "reward: exec nft failed: %s\n", strerror(errno));
+        _exit(127);
+    }
+    close(fds[0]);
+    if (pid < 0)
+    {
+        fprintf(stderr, "reward: fork(): %s\n", strerror(errno));
+        close(fds[1]);
+        return -1;
+    }
+    /* nft may exit before it reads everything; a write to the closed pipe
+     * must return EPIPE here, not kill the daemon with SIGPIPE. */
+    void (*old_pipe)(int) = signal(SIGPIPE, SIG_IGN);
+    size_t off = 0, len = strlen(script);
+    int werr = 0;
+    while (off < len)
+    {
+        ssize_t w = write(fds[1], script + off, len - off);
+        if (w < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            werr = 1;
+            break;
+        }
+        off += (size_t)w;
+    }
+    close(fds[1]);
+    signal(SIGPIPE, old_pipe);
+
+    int status = 0;
+    pid_t w;
+    do
+        w = waitpid(pid, &status, 0);
+    while (w < 0 && errno == EINTR);
+    if (w < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0 || werr)
+    {
+        fprintf(stderr, "reward: nft -f - failed\n");
+        return -1;
+    }
+    return 0;
+}
+
 int reward_init(reward_t *r, const char *table, const char *iface,
                 const uint16_t *ports, size_t n_ports, proto_t proto,
                 double fallback_ttl, long max_allowed)
@@ -120,83 +280,18 @@ int reward_init(reward_t *r, const char *table, const char *iface,
     r->proto = proto;
     r->fallback_ttl = fallback_ttl > 0 ? fallback_ttl : 30.0;
 
+    /* The fixed lines and each port's rules stay well inside these bounds
+     * (table and interface names are at most 64 bytes each). */
+    size_t cap = 1024 + n_ports * 640;
+    char *script = malloc(cap);
+    if (!script)
+        return -1;
     char cmd[512];
-    int failed = 0; /* any nft command below failing aborts startup */
-
-    /* `add` is idempotent for an identical table/set/chain, so only a real
-     * failure (no nft, no CAP_NET_ADMIN, a conflicting object) is reported. */
-    snprintf(cmd, sizeof(cmd), "add table %s", r->table);
-    failed |= run_nft_str(cmd);
-
-    /* Per-family allowed sets (per-element timeout). */
-    snprintf(cmd, sizeof(cmd),
-             "add set %s %s { type ipv4_addr; flags timeout; size %ld; }",
-             r->table, r->set_v4, max_allowed);
-    failed |= run_nft_str(cmd);
-    snprintf(cmd, sizeof(cmd),
-             "add set %s %s { type ipv6_addr; flags timeout; size %ld; }",
-             r->table, r->set_v6, max_allowed);
-    failed |= run_nft_str(cmd);
-
-    /* Base chain, policy accept so other traffic is unaffected. */
-    snprintf(
-        cmd, sizeof(cmd),
-        "add chain %s %s { type filter hook input priority 0; policy accept; }",
-        r->table, r->chain);
-    failed |= run_nft_str(cmd);
-
-    /* Clear any prior rules (idempotent re-init). */
-    snprintf(cmd, sizeof(cmd), "flush chain %s %s", r->table, r->chain);
-    failed |= run_nft_str(cmd);
-
-    /* Let established flows through before any drop rule. A drop in any base
-     * chain is final in nftables (an accept elsewhere can't override it), so
-     * without this, removing an IP from the allowed set - TTL expiry, close on
-     * connect, admin revoke - and even starting the daemon would cut sessions
-     * that are already open. Only NEW connections are gated by the knock. */
-    snprintf(cmd, sizeof(cmd),
-             "add rule %s %s ct state established,related accept", r->table,
-             r->chain);
-    failed |= run_nft_str(cmd);
-
-    /* One accept (per family) + one drop rule per service port. The drop rule
-     * matches both families in an inet table. Adding an IP to the allowed set
-     * opens every port, since each accept rule references that set. */
-    for (size_t i = 0; i < n_ports; i++)
-    {
-        uint16_t port = ports[i];
-        snprintf(cmd, sizeof(cmd),
-                 "add rule %s %s ip saddr @%s %s dport %d accept", r->table,
-                 r->chain, r->set_v4, proto_str(proto), port);
-        failed |= run_nft_str(cmd);
-        snprintf(cmd, sizeof(cmd),
-                 "add rule %s %s ip6 saddr @%s %s dport %d accept", r->table,
-                 r->chain, r->set_v6, proto_str(proto), port);
-        failed |= run_nft_str(cmd);
-
-        /* TCP sessions that were open before conntrack started tracking them
-         * (e.g. the admin's SSH session when the daemon first starts on a host
-         * with no other stateful firewall) show up as ct state "new" on their
-         * first mid-stream packet. Accept segments that carry ACK but not SYN:
-         * they can never open a connection (that needs a SYN), and a stray ACK
-         * gets a RST whether or not the port is open, so this leaks nothing to
-         * a scanner. Once accepted, conntrack picks the flow up. */
-        if (proto == PROTO_TCP)
-        {
-            snprintf(cmd, sizeof(cmd),
-                     "add rule %s %s tcp dport %d tcp flags & (syn | ack) == "
-                     "ack accept",
-                     r->table, r->chain, port);
-            failed |= run_nft_str(cmd);
-        }
-
-        /* Only on the trigger's own interface: other interfaces (a VPN,
-         * loopback) are left alone, so they never lock anyone out. */
-        snprintf(cmd, sizeof(cmd),
-                 "add rule %s %s iifname \"%s\" %s dport %d drop", r->table,
-                 r->chain, iface, proto_str(proto), port);
-        failed |= run_nft_str(cmd);
-    }
+    int failed = reward_script(script, cap, r->table, iface, ports, n_ports,
+                               proto, max_allowed);
+    if (!failed)
+        failed = run_nft_script(script);
+    free(script);
 
     if (failed)
     {
