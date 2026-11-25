@@ -506,17 +506,25 @@ totp_conf() { # [extra trigger name]
 totp_conf > "$WORK/totp.conf"
 if sudo ip netns exec "$NS" "$BIN" -t "$WORK/totp.conf" >/dev/null 2>&1; then check "-t accepts the secret_file config" 1 1; else check "-t accepts the secret_file config" 1 0; fi
 start_daemon "$WORK/totp.conf" || { echo "FAIL totp daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); }
+# A -K knock keeps its state under XDG_STATE_HOME; a per-test directory stops
+# state leaking from the runner's home. A fresh directory is a second client.
+kk() { local st="$1"; shift; mkdir -p "$WORK/state-$st"; XDG_STATE_HOME="$WORK/state-$st" "$KNOCK" "$@"; }
 totp_set() { sudo ip netns exec "$NS" nft list set inet sourceknock_totpe2e allowed_v4 2>/dev/null; }
 totp_set | grep -q "size 512" && check "max_allowed sets the set size" 1 1 || { check "max_allowed sets the set size" 1 0; totp_set; }
 # Stay inside one 30s step for the next three knocks.
 sec=$(( $(date +%s) % 30 )); [ "$sec" -ge 22 ] && sleep $((31 - sec))
-"$KNOCK" -s "$CLIENT" -d 50 -p 4445 -K "$WORK/bad.key" "$SERVER"; sleep 0.5
+kk bad -s "$CLIENT" -d 50 -p 4445 -K "$WORK/bad.key" "$SERVER"; sleep 0.5
 totp_set | grep -q "$CLIENT" && check "wrong key doesn't open" 0 1 || check "wrong key doesn't open" 0 0
 STEP0=$(( $(date +%s) / 30 ))
-"$KNOCK" -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
+kk a -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
 totp_set | grep -q "$CLIENT" && check "right key opens" 1 1 || { check "right key opens" 1 0; tail -5 "$LOG"; }
+# The same client knocks again in the same step: -K sends the next step.
 sudo ip netns exec "$NS" nft flush set inet sourceknock_totpe2e allowed_v4
-"$KNOCK" -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
+kk a -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
+totp_set | grep -q "$CLIENT" && check "second -K knock in one step opens" 1 1 || { check "second -K knock in one step opens" 1 0; tail -5 "$LOG"; }
+# A different client (fresh state) replays the step the first one used.
+sudo ip netns exec "$NS" nft flush set inet sourceknock_totpe2e allowed_v4
+kk replay -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
 totp_set | grep -q "$CLIENT" && check "same step's knock replayed: refused" 0 1 || check "same step's knock replayed: refused" 0 0
 grep -q "already used" "$LOG" && check "replay logged" 1 1 || check "replay logged" 1 0
 
@@ -546,7 +554,7 @@ sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_newe2e && check "
 # the replay protection survives a reload
 sudo ip netns exec "$NS" nft flush set inet sourceknock_totpe2e allowed_v4
 if [ $(( $(date +%s) / 30 )) -eq "$STEP0" ]; then
-  "$KNOCK" -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
+  kk replay2 -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
   totp_set | grep -q "$CLIENT" && check "used step still refused after reload" 0 1 || check "used step still refused after reload" 0 0
 fi
 
