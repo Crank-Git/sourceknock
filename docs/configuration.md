@@ -114,7 +114,11 @@ closed port sends, so a scan still sees nothing.
   existing session, a browser, other hosts behind the same NAT) can reset a
   knock in progress, and replies to the server's own outbound connections
   (which arrive from the remote's service port) can look like knock steps.
-  Send the knock to this port (pick one nothing listens on, and not a service
+  **Set `knock_port` on every trigger whose clients can have a busy session
+  open while they knock** (for example a client that re-knocks to open a
+  second connection). Without it, the data frames of that session can arrive
+  between two knock packets and the knock fails at random with
+  `incomplete/wrong knock ... progress reset` in the log. Send the knock to this port (pick one nothing listens on, and not a service
   port, so in `close_on_connect` mode a re-knock can't close the port). The
   close-on-connect detection is unaffected.
 - `max_allowed` (optional, default 256) — the most client addresses let in at
