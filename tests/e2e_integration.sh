@@ -116,7 +116,8 @@ expect_refuse() { # label conf [nocap]
     check "$label: refuses to start (exit $rc)" 1 0; tail -5 "$out"
   fi
   local left; left="$(nft_tables)"
-  if [ "$left" = "0" ]; then check "$label: no table left behind" 1 1; else check "$label: no table left behind ($left)" 1 0; fi
+  # KEEP: tables the test made itself (a failed run leaves those as they were).
+  if [ "$left" = "${KEEP:-0}" ]; then check "$label: no table left behind" 1 1; else check "$label: no table left behind ($left)" 1 0; fi
   if probe; then check "$label: port untouched" 1 1; else check "$label: port untouched" 1 0; fi
   sudo ip netns exec "$NS" nft flush ruleset
 }
@@ -136,14 +137,14 @@ grep -q "could not program nftables" "$WORK/refuse.log" && check "no CAP_NET_ADM
 # An nft object the daemon can't reconcile (allowed_v4 with the wrong type).
 sudo ip netns exec "$NS" nft add table inet "sourceknock_$SERVICE"
 sudo ip netns exec "$NS" nft add set inet "sourceknock_$SERVICE" allowed_v4 '{ type ipv6_addr; }'
-expect_refuse "conflicting nft set" "$CONF"
+KEEP=1 expect_refuse "conflicting nft set" "$CONF"
 
 # Second trigger fails after the first was fully programmed: the first
 # trigger's table must be removed too, or its drop rule would lock the port.
 { cat "$CONF"; printf '\n[trigger:other]\nservice = other\nport = %s\nsequence = 4400,5500,6600\n' "$((PORT+5))"; } > "$WORK/two.conf"
 sudo ip netns exec "$NS" nft add table inet sourceknock_other
 sudo ip netns exec "$NS" nft add set inet sourceknock_other allowed_v4 '{ type ipv6_addr; }'
-expect_refuse "second trigger fails" "$WORK/two.conf"
+KEEP=1 expect_refuse "second trigger fails" "$WORK/two.conf"
 
 # Wait for a file to appear (up to ~5s).
 wait_file() { for _ in $(seq 1 50); do [ -f "$1" ] && return 0; sleep 0.1; done; return 1; }
@@ -155,17 +156,9 @@ python3 "$DRIVER" hold "$SERVER" "$PORT" 3 "$WORK/pre_up" >"$WORK/pre_hold.log" 
 PRE_HOLD=$!
 wait_file "$WORK/pre_up" || echo "pre-start hold never connected"
 
-# A stand-in `nft` that fails every `nft -f -` run while $WORK/nft_fail exists,
-# so a test can make the daemon's table programming fail. The daemon starts
-# with it first in PATH; every other call goes to the real nft.
-REAL_NFT="$(command -v nft)"
-mkdir -p "$WORK/shim"
-printf '#!/bin/sh\nif [ -e "%s/nft_fail" ] && [ "$1 $2" = "-f -" ]; then cat >/dev/null; echo "nft: forced failure" >&2; exit 1; fi\nexec "%s" "$@"\n' "$WORK" "$REAL_NFT" > "$WORK/shim/nft"
-chmod +x "$WORK/shim/nft"
-
 start_daemon() { # [conf]
   : > "$LOG"
-  sudo ip netns exec "$NS" env PATH="$WORK/shim:$PATH" setsid "$BIN" "${1:-${RUNCONF:-$CONF}}" >"$LOG" 2>&1 </dev/null &
+  sudo ip netns exec "$NS" setsid "$BIN" "${1:-${RUNCONF:-$CONF}}" >"$LOG" 2>&1 </dev/null &
   DAEMON_PID=$!
   for _ in $(seq 1 50); do grep -q "listening for knocks" "$LOG" 2>/dev/null && return 0; sleep 0.1; done
   return 1
@@ -639,18 +632,28 @@ if [ $(( $(date +%s) / 30 )) -eq "$STEP0" ]; then
 fi
 
 # A reload whose nft run fails must leave the live table alone: the drop rules
-# stay and the clients already let in stay in. (The stand-in nft fails the run.)
+# stay and the clients already let in stay in. The failure is a conflict nft
+# rejects: the live chain exists with another priority than the daemon's.
 echo "--- reload whose nft run fails ---"
-sudo ip netns exec "$NS" nft flush set inet sourceknock_totpe2e allowed_v4
-sudo ip netns exec "$NS" nft add element inet sourceknock_totpe2e allowed_v4 "{ $CLIENT timeout 300s }"
+TT=sourceknock_totpe2e
+sudo ip netns exec "$NS" nft flush chain inet $TT service
+sudo ip netns exec "$NS" nft delete chain inet $TT service
+sudo ip netns exec "$NS" nft add chain inet $TT service '{ type filter hook input priority 5; policy accept; }'
+sudo ip netns exec "$NS" nft add rule inet $TT service tcp dport "$TOTP_PORT" drop
+sudo ip netns exec "$NS" nft flush set inet $TT allowed_v4
+sudo ip netns exec "$NS" nft add element inet $TT allowed_v4 "{ $CLIENT timeout 300s }"
 n0=$(grep -c "could not apply the new config" "$LOG")
-touch "$WORK/nft_fail"
 sudo pkill -HUP -x sourceknock
 for _ in $(seq 1 50); do [ "$(grep -c "could not apply the new config" "$LOG")" -gt "$n0" ] && break; sleep 0.1; done
-rm -f "$WORK/nft_fail"
 [ "$(grep -c "could not apply the new config" "$LOG")" -gt "$n0" ] && check "failed reload is refused" 1 1 || { check "failed reload is refused" 1 0; tail -8 "$LOG"; }
-sudo ip netns exec "$NS" nft list chain inet sourceknock_totpe2e service 2>/dev/null | grep -q "dport $TOTP_PORT drop" && check "failed reload keeps the drop rules" 1 1 || check "failed reload keeps the drop rules" 1 0
-totp_set | grep -q "$CLIENT" && check "failed reload keeps the allowed clients" 1 1 || check "failed reload keeps the allowed clients" 1 0
+sudo ip netns exec "$NS" nft list chain inet $TT service 2>/dev/null | grep -q "dport $TOTP_PORT drop" && check "failed reload keeps the drop rules" 1 1 || check "failed reload keeps the drop rules" 1 0
+totp_set | grep -q "$CLIENT" && check "failed reload keeps the allowed clients" 1 1 || { check "failed reload keeps the allowed clients" 1 0; sudo ip netns exec "$NS" nft list table inet $TT; tail -12 "$LOG"; }
+# Remove the conflict; the next reload rebuilds the chain.
+sudo ip netns exec "$NS" nft flush chain inet $TT service
+sudo ip netns exec "$NS" nft delete chain inet $TT service
+n0=$(grep -c "reload: applied" "$LOG")
+sudo pkill -HUP -x sourceknock
+for _ in $(seq 1 50); do [ "$(grep -c "reload: applied" "$LOG")" -gt "$n0" ] && break; sleep 0.1; done
 
 # Log timestamps are wall-clock time (not time since boot).
 echo "--- log timestamps ---"
