@@ -38,8 +38,10 @@ known-good one.
 make test       # build + run the cross-platform unit tests
 ```
 
-This runs `state_test`, `packet_test`, `config_test`, and `close_test` against
-the pure core (no socket code), so it works on any OS with a C compiler. It
+This runs `state_test`, `packet_test`, `config_test`, `close_test`,
+`totp_test` (SHA-256 / HMAC against the FIPS and RFC 4231 vectors) and
+`rolling_test` (time-based knocks) against the pure core (no socket code), so
+it works on any OS with a C compiler. It
 also builds the `sourceknock-knock` client and runs
 `tests/knock_client_test.py`, which sends real knocks to local UDP receivers
 and checks the source ports, order and error handling (needs `python3`).

@@ -12,6 +12,12 @@ sourceknock-knock \- send a source-port knock to a sourceknock server
 .RB [ \-4 | \-6 ]
 .I host
 .I sequence
+.br
+.B sourceknock-knock
+.BI \-K " keyfile"
+.RB [ \-r ]
+.RI [ options ]
+.I host
 .SH DESCRIPTION
 .B sourceknock-knock
 sends one UDP datagram per port in
@@ -50,6 +56,33 @@ Local address to send from (default: any).
 .BR \-4 ", " \-6
 Use IPv4 or IPv6 only.
 .TP
+.BI \-K " keyfile"
+For a trigger with
+.BR secret_file :
+derive the sequence from this copy of its secret and the current time, instead
+of giving a
+.IR sequence .
+The sequence changes every 30 seconds and the daemon accepts each one once.
+Keep the key file at mode 0600. If the group or other users can read it, the
+client prints a warning on stderr and still knocks.
+The client records the last step it sent in a small file (mode 0600) in
+.I $XDG_STATE_HOME/sourceknock/
+or
+.IR ~/.local/state/sourceknock/ ,
+one file for each key file and host. When the current step is already used,
+the client sends the next step, so you can knock twice in one step. When the
+next step is also used, it prints how many seconds to wait and exits with
+status 1. If the record cannot be read or written, the client prints one
+warning and knocks with the current step.
+.PP
+The record is local to one client. Two clients that share a secret do not
+share it, so they can still send the same step; the daemon refuses the second.
+.TP
+.B \-r
+With
+.BR \-K :
+send the revoke knock, which removes your address from the allowed set.
+.TP
 .B \-h
 Show usage.
 .SH EXAMPLES
@@ -74,7 +107,9 @@ All datagrams were sent.
 .TP
 .B 1
 Name resolution, bind or send failed (for example the source port is in use,
-or is below 1024 and you are not root).
+or is below 1024 and you are not root), or with
+.B \-K
+the current and next step are both used.
 .TP
 .B 2
 Invalid arguments.

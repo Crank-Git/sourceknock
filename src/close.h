@@ -28,7 +28,9 @@ int port_in_list(const trigger_t *tr, uint16_t port);
  * packet targets one of the service ports, the mode is close_on_connect, and
  * the packet is NOT the arming knock itself. The arming knock must never
  * close the port the instant it opens — for UDP there is no handshake, so the
- * first *subsequent* packet to the service port is what ends access. */
-int should_close(const trigger_t *tr, int armed, uint16_t dport, kn_result_t r);
+ * first *subsequent* packet to the service port is what ends access. For TCP
+ * only a SYN (a new connection) closes, never a segment of an open session. */
+int should_close(const trigger_t *tr, int armed, const pkt_info_t *pkt,
+                 kn_result_t r);
 
 #endif /* SOURCEKNOCK_CLOSE_H */

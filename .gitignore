@@ -1,11 +1,16 @@
 # build artifacts
 *.o
+*.d
 *.so
 /sourceknock
 /state_test
 /packet_test
 /config_test
 /close_test
+/totp_test
+/rolling_test
+/reward_test
+/retry_test
 /sourceknock-knock
 /tests/*.o
 # instrumented / debug builds

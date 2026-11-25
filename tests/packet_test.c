@@ -123,6 +123,30 @@ static void test_tcp_v6(void)
     CHECK_EQ_STR(s, "fe80::1234");
 }
 
+/* The TCP flags byte (offset 13 of the TCP header) is read for IPv4 and IPv6;
+ * a frame too short to carry it reports no flags. */
+static void test_tcp_flags(void)
+{
+    unsigned char buf[96];
+    pkt_info_t info;
+    build_frame(buf, IPPROTO_TCP, 1, 22, 10, 0, 0, 1);
+    buf[14 + 20 + 13] = PKT_TCP_SYN | PKT_TCP_ACK;
+    CHECK(pkt_parse(buf, 64, PKT_ARPHRD_ETHER, &info) == 1);
+    CHECK_EQ_INT(info.tcp_flags, PKT_TCP_SYN | PKT_TCP_ACK);
+    CHECK(pkt_parse(buf, 14 + 20 + 13, PKT_ARPHRD_ETHER, &info) == 1);
+    CHECK_EQ_INT(info.tcp_flags, 0);
+
+    build_frame_v6(buf, 1, 22);
+    buf[14 + 40 + 13] = PKT_TCP_SYN;
+    CHECK(pkt_parse(buf, sizeof(buf), PKT_ARPHRD_ETHER, &info) == 1);
+    CHECK_EQ_INT(info.tcp_flags, PKT_TCP_SYN);
+
+    build_frame(buf, IPPROTO_UDP, 1, 22, 10, 0, 0, 1);
+    buf[14 + 20 + 13] = 0xff;
+    CHECK(pkt_parse(buf, 64, PKT_ARPHRD_ETHER, &info) == 1);
+    CHECK_EQ_INT(info.tcp_flags, 0);
+}
+
 static void test_loopback_v6(void)
 {
     unsigned char buf[96];
@@ -292,6 +316,7 @@ int main(void)
     TEST_RUN(test_non_ipv4_ignored);
     TEST_RUN(test_too_short);
     TEST_RUN(test_tcp_v6);
+    TEST_RUN(test_tcp_flags);
     TEST_RUN(test_loopback_v6);
     TEST_RUN(test_raw_ip_links);
     TEST_RUN(test_raw_ip_v6);

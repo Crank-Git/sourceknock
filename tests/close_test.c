@@ -17,12 +17,28 @@ static trigger_t make_trigger(trigger_mode_t mode, const uint16_t *ports,
     return tr;
 }
 
+/* A captured packet to `dport`. */
+static const pkt_info_t *pkt(proto_t proto, uint16_t dport, uint8_t flags)
+{
+    static pkt_info_t p;
+    memset(&p, 0, sizeof(p));
+    p.proto = proto;
+    p.dport = dport;
+    p.tcp_flags = flags;
+    return &p;
+}
+
+static const pkt_info_t *udp(uint16_t dport)
+{
+    return pkt(PROTO_UDP, dport, 0);
+}
+
 /* Not armed -> never close, even if a packet hits a service port. */
 static void test_close_only_when_armed(void)
 {
     uint16_t ports[] = {22};
     trigger_t tr = make_trigger(MODE_CLOSE_ON_CONNECT, ports, 1);
-    CHECK(!should_close(&tr, 0, 22, KNOCK_IGNORE));
+    CHECK(!should_close(&tr, 0, udp(22), KNOCK_IGNORE));
 }
 
 /* The arming knock (KNOCK_TRIGGER) must NOT close the port the instant it
@@ -31,9 +47,9 @@ static void test_arming_knock_does_not_close(void)
 {
     uint16_t ports[] = {22};
     trigger_t tr = make_trigger(MODE_CLOSE_ON_CONNECT, ports, 1);
-    CHECK(!should_close(&tr, 1, 22, KNOCK_TRIGGER));
-    CHECK(should_close(&tr, 1, 22, KNOCK_IGNORE));
-    CHECK(should_close(&tr, 1, 22, KNOCK_RESET));
+    CHECK(!should_close(&tr, 1, udp(22), KNOCK_TRIGGER));
+    CHECK(should_close(&tr, 1, udp(22), KNOCK_IGNORE));
+    CHECK(should_close(&tr, 1, udp(22), KNOCK_RESET));
 }
 
 /* Only a packet to one of the service ports closes the port. */
@@ -41,7 +57,7 @@ static void test_dport_must_match(void)
 {
     uint16_t ports[] = {22};
     trigger_t tr = make_trigger(MODE_CLOSE_ON_CONNECT, ports, 1);
-    CHECK(!should_close(&tr, 1, 80, KNOCK_IGNORE));
+    CHECK(!should_close(&tr, 1, udp(80), KNOCK_IGNORE));
 }
 
 /* Only close_on_connect mode closes; fixed_ttl never does. */
@@ -49,7 +65,26 @@ static void test_only_close_on_connect_mode(void)
 {
     uint16_t ports[] = {22};
     trigger_t fixed = make_trigger(MODE_FIXED_TTL, ports, 1);
-    CHECK(!should_close(&fixed, 1, 22, KNOCK_IGNORE));
+    CHECK(!should_close(&fixed, 1, udp(22), KNOCK_IGNORE));
+}
+
+/* TCP: only a new connection's SYN closes; segments of a session that is
+ * already open (keepalives, data, FIN) and SYN-ACKs must not. */
+static void test_tcp_only_syn_closes(void)
+{
+    uint16_t ports[] = {22};
+    trigger_t tr = make_trigger(MODE_CLOSE_ON_CONNECT, ports, 1);
+    tr.protocol = PROTO_TCP;
+    CHECK(should_close(&tr, 1, pkt(PROTO_TCP, 22, PKT_TCP_SYN), KNOCK_IGNORE));
+    CHECK(!should_close(&tr, 1, pkt(PROTO_TCP, 22, PKT_TCP_ACK), KNOCK_IGNORE));
+    CHECK(!should_close(&tr, 1, pkt(PROTO_TCP, 22, 0x18),
+                        KNOCK_IGNORE)); /* PSH|ACK */
+    CHECK(!should_close(&tr, 1, pkt(PROTO_TCP, 22, 0x11),
+                        KNOCK_IGNORE)); /* FIN|ACK */
+    CHECK(!should_close(&tr, 1, pkt(PROTO_TCP, 22, PKT_TCP_SYN | PKT_TCP_ACK),
+                        KNOCK_IGNORE));
+    CHECK(!should_close(&tr, 1, pkt(PROTO_TCP, 80, PKT_TCP_SYN), KNOCK_IGNORE));
+    CHECK(!should_close(&tr, 0, pkt(PROTO_TCP, 22, PKT_TCP_SYN), KNOCK_IGNORE));
 }
 
 static void test_port_in_list(void)
@@ -81,7 +116,7 @@ static void test_knock_counts(void)
 
     /* the close decision is independent of knock_port */
     tr.mode = MODE_CLOSE_ON_CONNECT;
-    CHECK(should_close(&tr, 1, 22, KNOCK_IGNORE));
+    CHECK(should_close(&tr, 1, udp(22), KNOCK_IGNORE));
 }
 
 int main(void)
@@ -91,6 +126,7 @@ int main(void)
     TEST_RUN(test_arming_knock_does_not_close);
     TEST_RUN(test_dport_must_match);
     TEST_RUN(test_only_close_on_connect_mode);
+    TEST_RUN(test_tcp_only_syn_closes);
     TEST_RUN(test_port_in_list);
     TEST_RUN(test_knock_counts);
     TEST_SUMMARY();

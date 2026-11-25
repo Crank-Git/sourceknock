@@ -42,13 +42,6 @@ const char *pkt_link_name(unsigned int hatype);
 
 typedef enum
 {
-    PKT_NONE = 0, /* not something we understand */
-    PKT_IPV4,     /* IPv4 we could parse */
-    PKT_IPV6,     /* IPv6 we could parse */
-} pkt_kind_t;
-
-typedef enum
-{
     PROTO_NONE = 0,
     PROTO_TCP,
     PROTO_UDP
@@ -70,7 +63,11 @@ typedef struct
     uint16_t sport; /* host-byte-order source port */
     uint16_t dport; /* host-byte-order destination port (0 if n/a) */
     proto_t proto;
+    uint8_t tcp_flags; /* TCP flags byte (PKT_TCP_*); 0 for UDP */
 } pkt_info_t;
+
+#define PKT_TCP_SYN 0x02
+#define PKT_TCP_ACK 0x10
 
 /* Length in bytes of the address stored for a given family. */
 static inline size_t pkt_addr_len(int family)

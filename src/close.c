@@ -14,8 +14,14 @@ int port_in_list(const trigger_t *tr, uint16_t port)
     return 0;
 }
 
-int should_close(const trigger_t *tr, int armed, uint16_t dport, kn_result_t r)
+int should_close(const trigger_t *tr, int armed, const pkt_info_t *pkt,
+                 kn_result_t r)
 {
+    /* For TCP only a new connection's SYN counts: segments of a session that
+     * is already open (keepalives, data) must not close the port. */
+    if (pkt->proto == PROTO_TCP &&
+        (pkt->tcp_flags & (PKT_TCP_SYN | PKT_TCP_ACK)) != PKT_TCP_SYN)
+        return 0;
     return tr->mode == MODE_CLOSE_ON_CONNECT && armed && r != KNOCK_TRIGGER &&
-           port_in_list(tr, dport);
+           port_in_list(tr, pkt->dport);
 }
