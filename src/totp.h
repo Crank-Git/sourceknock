@@ -49,4 +49,10 @@ void totp_sequence(const unsigned char *key, size_t keylen, const char *label,
 int totp_load_key(const char *path, unsigned char key[TOTP_KEY_MAX],
                   size_t *keylen, char *err, size_t errlen);
 
+/* Check that the group and other users cannot read a key file. Returns 1 and
+ * fills `msg` (path, mode and the chmod fix) when `mode & 077` is not zero.
+ * Returns 0 otherwise. A stat() failure also returns 0: totp_load_key()
+ * reports that error. */
+int totp_key_mode_warning(const char *path, char *msg, size_t msglen);
+
 #endif /* SOURCEKNOCK_TOTP_H */

@@ -117,6 +117,7 @@ def test_keyfile():
     path = os.path.join(d, "k.key")
     with open(path, "wb") as f:
         f.write(key + b"\n")
+    os.chmod(path, 0o600)
     for label, extra in (("knock", ["-K", path]), ("revoke", ["-K", path, "-r"])):
         step = int(time.time()) // 30
         p, got = receive(socket.AF_INET, "127.0.0.1", None, extra, count=4)
@@ -163,6 +164,7 @@ def test_keyfile_state():
     path = os.path.join(d, "k.key")
     with open(path, "wb") as f:
         f.write(key + b"\n")
+    os.chmod(path, 0o600)
     env = {"XDG_STATE_HOME": os.path.join(d, "state")}
     if time.time() % 30 > 24:  # keep the three knocks inside one step
         time.sleep(7)
@@ -207,6 +209,27 @@ def test_keyfile_state():
     subprocess.run(["rm", "-rf", d])
 
 
+def test_keyfile_mode_warning():
+    """-K warns on stderr about a key file others can read, and still knocks."""
+    d = tempfile.mkdtemp()
+    key = b"client-test-secret-0123456789"
+    path = os.path.join(d, "k.key")
+    with open(path, "wb") as f:
+        f.write(key + b"\n")
+    env = {"XDG_STATE_HOME": os.path.join(d, "state")}
+    os.chmod(path, 0o600)
+    p, _ = knock_state(env, path)
+    check("mode: 0600 key gives no warning", "mode" not in p.stderr, p.stderr)
+    os.chmod(path, 0o644)
+    p, got = knock_state({"XDG_STATE_HOME": os.path.join(d, "state2")}, path)
+    check("mode: 0644 key still knocks", p.returncode == 0 and len(got) == 4,
+          f"{got} {p.stderr}")
+    check("mode: 0644 key warns with path, mode and fix",
+          path in p.stderr and "0644" in p.stderr and "chmod 600" in p.stderr,
+          p.stderr)
+    subprocess.run(["rm", "-rf", d])
+
+
 def test_source_port_in_use():
     holder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     holder.bind(("127.0.0.1", 47404))
@@ -233,7 +256,8 @@ def test_privileged_port_needs_root():
 if __name__ == "__main__":
     print("== knock client tests ==")
     for t in (test_ipv4_order_and_source_ports, test_ipv4_with_source_address,
-              test_ipv6, test_bad_arguments, test_keyfile, test_keyfile_state, test_source_port_in_use,
+              test_ipv6, test_bad_arguments, test_keyfile, test_keyfile_state, test_keyfile_mode_warning,
+              test_source_port_in_use,
               test_privileged_port_needs_root):
         print(f"[run] {t.__name__}")
         t()

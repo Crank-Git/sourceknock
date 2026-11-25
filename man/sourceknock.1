@@ -153,7 +153,11 @@ a file holding a shared secret (at least 16 bytes). The sequence is then 4
 ports derived from HMAC-SHA256 of the secret and the 30-second time step,
 like a 2FA code. The previous, current and next step are accepted (clocks may
 differ by about 30 seconds; keep them synced), and each step's sequence opens
-the port only once, so a seen knock can't be replayed. Knock with
+the port only once, so a seen knock can't be replayed. The file must have
+mode 0600 (owned by the daemon's user). If the group or other users can read
+it, the daemon logs a warning at start, at reload and in
+.BR "\-t" ,
+and still uses the key. Knock with
 .BR "sourceknock-knock -K" ;
 .B \-r
 sends the revoke knock.

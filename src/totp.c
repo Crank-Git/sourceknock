@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* ---- SHA-256 (FIPS 180-4) ---- */
 
@@ -185,6 +186,18 @@ void totp_sequence(const unsigned char *key, size_t keylen, const char *label,
         unsigned v = (unsigned)mac[2 * i] << 8 | mac[2 * i + 1];
         out[i] = (uint16_t)(TOTP_PORT_MIN + v % TOTP_PORT_SPAN);
     }
+}
+
+int totp_key_mode_warning(const char *path, char *msg, size_t msglen)
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || (st.st_mode & 077) == 0)
+        return 0;
+    snprintf(msg, msglen,
+             "key file '%s' has mode %04o: other users can read the secret; "
+             "run: chmod 600 '%s'",
+             path, (unsigned)(st.st_mode & 0777), path);
+    return 1;
 }
 
 int totp_load_key(const char *path, unsigned char key[TOTP_KEY_MAX],
