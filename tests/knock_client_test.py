@@ -19,6 +19,8 @@ import sys
 import tempfile
 import time
 
+# Keep the client's step records out of the real home directory.
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./sourceknock-knock")
 passed = failed = 0
 
@@ -115,6 +117,7 @@ def test_keyfile():
     path = os.path.join(d, "k.key")
     with open(path, "wb") as f:
         f.write(key + b"\n")
+    os.chmod(path, 0o600)
     for label, extra in (("knock", ["-K", path]), ("revoke", ["-K", path, "-r"])):
         step = int(time.time()) // 30
         p, got = receive(socket.AF_INET, "127.0.0.1", None, extra, count=4)
@@ -133,6 +136,98 @@ def test_keyfile():
     p = run("-K", path, "127.0.0.1")
     check("missing secret file -> exit 1", p.returncode == 1, p.stderr)
     os.rmdir(d)
+
+
+def knock_state(extra_env, key_path, *extra):
+    """Run `-K` once at a local receiver; return (process, sports)."""
+    r = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    r.bind(("127.0.0.1", 0))
+    r.settimeout(1.0)
+    env = dict(os.environ, **extra_env)
+    p = subprocess.run([BIN, "-p", str(r.getsockname()[1]), "-d", "20", "-K", key_path,
+                        *extra, "127.0.0.1"], capture_output=True, text=True,
+                       timeout=20, env=env)
+    got = []
+    try:
+        for _ in range(4):
+            got.append(r.recvfrom(64)[1][1])
+    except socket.timeout:
+        pass
+    r.close()
+    return p, got
+
+
+def test_keyfile_state():
+    """-K falls back to the next step after a used one, then refuses."""
+    d = tempfile.mkdtemp()
+    key = b"client-test-secret-0123456789"
+    path = os.path.join(d, "k.key")
+    with open(path, "wb") as f:
+        f.write(key + b"\n")
+    os.chmod(path, 0o600)
+    env = {"XDG_STATE_HOME": os.path.join(d, "state")}
+    if time.time() % 30 > 24:  # keep the three knocks inside one step
+        time.sleep(7)
+    step = int(time.time()) // 30
+    cur, nxt = (totp_ports(key, "knock", s) for s in (step, step + 1))
+
+    p, got = knock_state(env, path)
+    check("state: first knock exit 0", p.returncode == 0, p.stderr)
+    check("state: first knock = current step", got == cur, f"{got} vs {cur}")
+    mode = None
+    for root, _, files in os.walk(env["XDG_STATE_HOME"]):
+        for name in files:
+            mode = os.stat(os.path.join(root, name)).st_mode & 0o777
+    check("state: file mode 0600", mode == 0o600, str(mode))
+
+    p, got = knock_state(env, path)
+    check("state: second knock exit 0", p.returncode == 0, p.stderr)
+    check("state: second knock = next step", got == nxt, f"{got} vs {nxt}")
+
+    p, got = knock_state(env, path)
+    check("state: third knock exit 1", p.returncode == 1, f"rc={p.returncode}")
+    check("state: third knock sends nothing", got == [], str(got))
+    check("state: third knock says how long to wait",
+          "wait" in p.stderr and " s" in p.stderr, p.stderr)
+
+    p, got = knock_state(env, path, "-r")
+    check("state: revoke has its own entry", p.returncode == 0 and
+          got == totp_ports(key, "revoke", step), f"{got} {p.stderr}")
+
+    other = {"XDG_STATE_HOME": os.path.join(d, "state2")}
+    p, got = knock_state(other, path)
+    check("state: new state dir starts over", got == cur, f"{got} vs {cur}")
+
+    # A regular file where the directory belongs: warn once, still knock.
+    blocker = os.path.join(d, "blocker")
+    open(blocker, "w").close()
+    p, got = knock_state({"XDG_STATE_HOME": blocker}, path)
+    check("state: unwritable dir still knocks", p.returncode == 0 and got == cur,
+          f"{got} vs {cur} {p.stderr}")
+    check("state: unwritable dir warns once",
+          p.stderr.count("warning") == 1, p.stderr)
+    subprocess.run(["rm", "-rf", d])
+
+
+def test_keyfile_mode_warning():
+    """-K warns on stderr about a key file others can read, and still knocks."""
+    d = tempfile.mkdtemp()
+    key = b"client-test-secret-0123456789"
+    path = os.path.join(d, "k.key")
+    with open(path, "wb") as f:
+        f.write(key + b"\n")
+    env = {"XDG_STATE_HOME": os.path.join(d, "state")}
+    os.chmod(path, 0o600)
+    p, _ = knock_state(env, path)
+    check("mode: 0600 key gives no warning", "mode" not in p.stderr, p.stderr)
+    os.chmod(path, 0o644)
+    p, got = knock_state({"XDG_STATE_HOME": os.path.join(d, "state2")}, path)
+    check("mode: 0644 key still knocks", p.returncode == 0 and len(got) == 4,
+          f"{got} {p.stderr}")
+    check("mode: 0644 key warns with path, mode and fix",
+          path in p.stderr and "0644" in p.stderr and "chmod 600" in p.stderr,
+          p.stderr)
+    subprocess.run(["rm", "-rf", d])
 
 
 def test_source_port_in_use():
@@ -161,7 +256,8 @@ def test_privileged_port_needs_root():
 if __name__ == "__main__":
     print("== knock client tests ==")
     for t in (test_ipv4_order_and_source_ports, test_ipv4_with_source_address,
-              test_ipv6, test_bad_arguments, test_keyfile, test_source_port_in_use,
+              test_ipv6, test_bad_arguments, test_keyfile, test_keyfile_state, test_keyfile_mode_warning,
+              test_source_port_in_use,
               test_privileged_port_needs_root):
         print(f"[run] {t.__name__}")
         t()

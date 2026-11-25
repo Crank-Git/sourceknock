@@ -22,6 +22,7 @@ typedef struct
     void *arg;
     int fd;              /* AF_PACKET fd, -1 on error */
     unsigned int hatype; /* interface link type (PKT_ARPHRD_*) */
+    double last_try;     /* monotonic time of the last open attempt, 0 = none */
 } capture_t;
 
 /* Open a raw AF_PACKET socket on `interface`. Returns 0 on success, 1 if the

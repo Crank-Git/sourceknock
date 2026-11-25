@@ -119,24 +119,37 @@ secret and the clock, like a 2FA code:
   every knock fail.
 - Each step's sequence opens the port **once**. Repeating it, from any
   address, is refused and logged ("already used"), so a knock someone sees
-  can't be replayed. If you knock twice within 30 seconds, the second one is
-  refused; wait for the next step.
+  can't be replayed.
+- `sourceknock-knock -K` records the last step it sent for each key file and
+  host in `$XDG_STATE_HOME/sourceknock/` (default
+  `~/.local/state/sourceknock/`, files mode 0600). When the current step is
+  used, it sends the next step, so you can knock twice within 30 seconds. A
+  third knock in that time exits with status 1 and prints how many seconds to
+  wait. If the record cannot be read or written, the client prints one
+  warning and knocks with the current step.
+- The record is local to one client. Two clients that share a secret do not
+  share it, so they can send the same step; the daemon refuses the second.
 - The revoke knock is derived from the same secret (`sourceknock-knock -K
   FILE -r`); `admin_sequence` can't be combined with `secret_file`.
 
 Create a secret (at least 16 bytes; the file's bytes, minus trailing
-whitespace, are the key) and give the daemon read access:
+whitespace, are the key). The file must have mode 0600, owned by the user that
+runs the daemon:
 
 ```sh
 head -c 32 /dev/urandom | base64 | sudo tee /etc/sourceknock/ssh.key >/dev/null
-sudo chown root:sourceknock /etc/sourceknock/ssh.key
-sudo chmod 0640 /etc/sourceknock/ssh.key
+sudo chown sourceknock:sourceknock /etc/sourceknock/ssh.key
+sudo chmod 0600 /etc/sourceknock/ssh.key
 ```
 
 Copy the same file to each client (keep it private) and knock with
 `sourceknock-knock -K ~/.config/sourceknock/ssh.key server.example.com`. The
 secret is read at start and on every reload, so a new secret takes effect with
 `systemctl reload sourceknock`.
+
+If the group or other users can read a key file, the daemon logs a warning
+at start, at reload and in `sourceknock -t`, and `sourceknock-knock -K` prints
+it on stderr. Both still use the key. Fix it with `chmod 600 FILE`.
 
 ## IPv4 and IPv6
 
