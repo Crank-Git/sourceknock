@@ -13,6 +13,17 @@ sudo ./sourceknock /path/to/sourceknock.conf
 
 With no argument it reads `/etc/sourceknock/sourceknock.conf`.
 
+Check a config before (re)starting the daemon:
+
+```sh
+sourceknock -t /etc/sourceknock/sourceknock.conf && sudo systemctl restart sourceknock
+```
+
+`-t` exits 0 if the daemon would accept the config and 1 with the reason if
+not; it needs no privileges and doesn't touch nftables. This matters because a
+daemon that refuses a new config exits and leaves the previous run's tables in
+place, closing the ports with nothing to open them.
+
 ## systemd
 
 On systemd hosts, install with `make install` (needs root). This places the
@@ -42,6 +53,49 @@ sudo systemctl enable --now sourceknock
 #   /etc/sourceknock/myconf.conf
 #   sudo systemctl enable --now sourceknock@myconf
 ```
+
+Apply config changes with a reload rather than a restart:
+
+```sh
+sudo systemctl reload sourceknock   # sends SIGHUP
+```
+
+A reload re-reads the config (and any `secret_file`). A config that doesn't
+parse, or can't be applied, is refused with the reason in the log and the
+running config is kept. A good one is applied in place: clients already let in
+stay in (a restart would drop them), new triggers get their tables, and removed
+triggers' tables are deleted.
+
+Each daemon marks every table it creates with the absolute path of its config
+as an nft table comment (`sourceknock:/etc/sourceknock/myconf.conf`). On start
+and on reload the daemon deletes any `inet sourceknock_*` table that is not in
+its config and carries its own mark, so a trigger you renamed or removed does
+not leave its port closed behind it. A table with no mark, or with the mark of
+another config, is never deleted: the daemon logs one warning that names it.
+So you can run several daemons on one host (for example
+`sourceknock@web` and `sourceknock@ssh`), each with its own config. Give the
+configs different `service` names, because a table name must be unique.
+
+The check that refuses two triggers on one port runs per config. Two daemons
+must not manage the same port: each daemon's table drops the port, so a knock
+that opens it in one table leaves the other table dropping it. A trigger with `close_on = all` drops its port on every interface, so it
+also drops that port for any other daemon that manages it.
+
+Requirements and limits:
+
+- nftables with table comments. This was tested with nft 1.0.9; the kernel
+  support for comments is in Linux 5.10 and later. If `nft` rejects the
+  comment, the daemon refuses to start. It logs `reward: nft -f - failed`
+  and `could not program nftables table`, with the `nft` error above them.
+- The absolute config path may have at most 116 characters, and no quote,
+  backslash or control character, because nft limits a comment to 128
+  characters. The daemon refuses a longer path.
+- `add table` does not change the comment of a table that exists already. A
+  table made by an earlier version has no mark, so the daemon keeps it and
+  warns. Delete it once (`nft delete table inet sourceknock_<service>`) and
+  reload to get a marked table. Moving or renaming a config file changes its
+  mark in the same way: the tables with the old mark stay until you delete
+  them.
 
 Stop / remove:
 
@@ -81,6 +135,10 @@ them; knock from elsewhere (or over a VPN that preserves ports).
 ## Notes and limitations
 
 - Linux only (`AF_PACKET`, nftables).
+- An interface that goes down, is deleted, or doesn't exist yet at startup
+  (e.g. a VPN that comes up later) doesn't stop the daemon: it logs it, keeps
+  that trigger's ports closed, keeps serving the other interfaces, and starts
+  reading knocks there again within a second of the interface being up.
 - Supported capture interfaces: Ethernet and loopback, and raw-IP links with
   no link header: tun and WireGuard (`wg0`), PPP, and ipip / ip6tnl / sit
   tunnels. The daemon logs the link type at startup and refuses anything else
@@ -110,7 +168,10 @@ removed again, so a failed start leaves the host as it was.
   or `CAP_NET_RAW`. Run it as root, or under the systemd unit (which grants
   only `CAP_NET_RAW` + `CAP_NET_ADMIN` to the unprivileged `sourceknock` user —
   see [Running](#running)).
-- **"cannot find interface"** — check `[global] interface =`.
+- **"interface '...' does not exist"** (from `-t`) — check `[global]
+  interface =` and any per-trigger `interface =`. The daemon itself still
+  starts with a missing interface (see below); `-t` reports it so a typo
+  doesn't go unnoticed.
 - **"has link type ... which sourceknock can't read knocks from"** — see the
   supported interfaces under [Notes and limitations](#notes-and-limitations).
 - **"could not program nftables table"** — `nft` is missing, or the process
@@ -121,8 +182,9 @@ removed again, so a failed start leaves the host as it was.
 
 ### The port never opens
 
-- **Wrong interface.** `[global] interface =` must be the daemon's capture
-  interface (the one that sees the client's frames), not the client's.
+- **Wrong interface.** The trigger's interface (`interface =` in the trigger,
+  else `[global]`) must be the one that sees the client's frames on the
+  server, not the client's.
 - **No knock seen.** The knock is encoded in the client's **source** port, not
   the destination port. Knock with `sourceknock-knock`, which binds each step
   to the right source port. If the trigger sets `knock_port`, pass it with

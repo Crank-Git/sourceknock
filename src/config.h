@@ -18,6 +18,12 @@ typedef enum
     MODE_PERMANENT         /* open with no timeout; revoke via admin_sequence */
 } trigger_mode_t;
 
+typedef enum
+{
+    CLOSE_ON_INTERFACE = 0, /* drop rules match only the trigger's interface */
+    CLOSE_ON_ALL            /* drop rules match every interface */
+} close_on_t;
+
 typedef struct
 {
     char service[64];
@@ -30,15 +36,23 @@ typedef struct
     size_t admin_seq_len;
     double window; /* whole sequence must finish within this */
     trigger_mode_t mode;
-    double duration;     /* seconds, for MODE_FIXED_TTL */
-    double fallback_ttl; /* safety max open time (close_on_connect) */
-    uint16_t knock_port; /* optional: only frames to this dest port count
-                            toward the knock (0 = any destination) */
+    double duration;       /* seconds, for MODE_FIXED_TTL */
+    double fallback_ttl;   /* safety max open time (close_on_connect) */
+    uint16_t knock_port;   /* optional: only frames to this dest port count
+                              toward the knock (0 = any destination) */
+    char interface[64];    /* where knocks are read and the ports are closed;
+                              defaults to [global] interface */
+    long max_allowed;      /* most client IPs allowed at once, per family */
+    char secret_file[256]; /* time-based knock (totp.h) instead of `sequence`;
+                              empty = use the fixed sequence */
+    close_on_t close_on;   /* where the drop rules apply; defaults to [global]
+                              close_on */
 } trigger_t;
 
 typedef struct
 {
     char interface[64];
+    close_on_t close_on; /* default for triggers that do not set it */
     trigger_t *triggers; /* n_triggers entries; each owns `sequence` */
     size_t n_triggers;
 } config_t;
@@ -65,6 +79,19 @@ int config_table_name(const char *service, char *out, size_t outlen);
  * weak (fewer than 3 ports, or a port in the Linux ephemeral range that
  * ordinary outgoing traffic uses), else 0. Advisory: the daemon warns. */
 int config_weak_sequence(const trigger_t *tr, char *msg, size_t msglen);
+
+/* Returns 1 and the warning text in `msg` when `tr` uses close_on = interface
+ * and `ifaces` (the host's interface names) holds interfaces other than `lo`
+ * and the trigger's own: its ports stay open there. Returns 0 otherwise. Pure:
+ * the caller lists the interfaces. Advisory: the daemon warns. */
+int config_open_interfaces_warning(const trigger_t *tr,
+                                   const char *const *ifaces, size_t n,
+                                   char *msg, size_t msglen);
+
+/* Compacts `names` in place to the entries whose `up` flag is set, keeping
+ * the order. Returns the new count. The caller sets `up` from IFF_UP. Pure: a
+ * down interface carries no traffic, so the warning leaves it out. */
+size_t config_keep_up_interfaces(const char **names, const int *up, size_t n);
 
 extern config_t g_cfg; /* populated by the above; used by the daemon */
 

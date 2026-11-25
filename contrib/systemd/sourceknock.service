@@ -13,6 +13,9 @@ Type=simple
 User=sourceknock
 Group=sourceknock
 ExecStart=/usr/local/bin/sourceknock /etc/sourceknock/sourceknock.conf
+# `systemctl reload`: re-read the config. A bad one is refused (logged) and
+# the running config kept, so this is safer than a restart.
+ExecReload=/bin/kill -HUP $MAINPID
 
 # AF_PACKET raw sockets need CAP_NET_RAW; running nft rules needs CAP_NET_ADMIN.
 # Grant exactly those and nothing else.

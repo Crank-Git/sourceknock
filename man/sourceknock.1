@@ -3,6 +3,7 @@
 sourceknock \- source-port port-knocking daemon
 .SH SYNOPSIS
 .B sourceknock
+.RB [ \-t ]
 .RI [ CONFIGFILE ]
 .SH DESCRIPTION
 .B sourceknock
@@ -59,6 +60,26 @@ See
 .IR CONFIGURATION
 below and the samples in
 .BR examples/ .
+.SH OPTIONS
+.TP
+.B \-t
+Check the configuration and exit: 0 if the daemon would accept it, 1 with the
+reason if not. Needs no privileges and does not touch nftables. Run it before
+restarting the daemon: a daemon that refuses a new config leaves the previous
+run's tables closing the ports.
+.SH SIGNALS
+.TP
+.B SIGHUP
+Reload the configuration (and any
+.BR secret_file ).
+A config that doesn't parse or can't be applied is refused and the running one
+kept; a good one is applied without dropping clients already let in.
+.B systemctl reload
+sends this.
+.TP
+.BR SIGTERM ", " SIGINT
+Stop: remove every allowed client and exit. The tables stay, so the ports stay
+closed.
 .SH CONFIGURATION
 Configuration is INI-style (knockd-flavoured) with a
 .B [global]
@@ -124,7 +145,84 @@ Optional destination port. When set, only frames sent to this port count
 toward the knock, so other traffic from the client (or replies to the
 server's own outbound connections) can neither advance nor reset it. Pick a
 port nothing listens on and that is not a service port.
+TCP segments of a flow that is already open (ACK set) never count toward a knock. UDP traffic from
+the same client, for example a WireGuard or QUIC flow, still does, so set it
+when a client can have such a flow open while it knocks.
+.IP \(bu 2
+.B secret_file
+Instead of
+.BR sequence :
+a file holding a shared secret (at least 16 bytes). The sequence is then 4
+ports derived from HMAC-SHA256 of the secret and the 30-second time step,
+like a 2FA code. The previous, current and next step are accepted (clocks may
+differ by about 30 seconds; keep them synced), and each step's sequence opens
+the port only once, so a seen knock can't be replayed. The file should have
+mode 0600 (owned by the daemon's user). If the group or other users can read
+it, the daemon logs a warning at start, at reload and in
+.BR "\-t" ,
+and still uses the key. Knock with
+.BR "sourceknock-knock -K" ;
+.B \-r
+sends the revoke knock.
+.IP \(bu 2
+.B max_allowed
+Optional. The most client addresses let in at once, per family (default 256).
+.IP \(bu 2
+.B interface
+Optional. The interface this trigger reads knocks from and closes its ports
+on; defaults to the
+.B [global]
+.BR interface .
+The drop rules match only packets arriving on it, so the same port over any
+other interface (a VPN, loopback) is left alone, unless the trigger sets
+.BR "close_on = all" .
+One daemon can guard
+services on several interfaces this way. An interface that is down, deleted
+or not there yet does not stop the daemon: that trigger's ports stay closed
+and knocks are read there again once it is up.
+.IP \(bu 2
+.B close_on
+Optional:
+.B interface
+or
+.BR all .
+Where the drop rules apply; defaults to the
+.B [global]
+.BR close_on ,
+and the built-in default is
+.BR interface .
+With
+.B interface
+the drop rules match only the trigger's interface, so the port stays open on
+the host's other interfaces. At start, at reload and in
+.B \-t
+the daemon logs one warning for each such trigger. It names the other
+interfaces that are up (not
+.BR lo )
+and says to set
+.BR "close_on = all" .
+With
+.B all
+the drop rules have no interface match, so the port is closed on every
+interface, including loopback. Knocks are still read only on the trigger's
+interface. Two triggers may not manage the same port and protocol when either
+one uses
+.BR all .
 .RE
+.PP
+Several daemons may run on one host, each with its own configuration.
+Every table carries the absolute path of its configuration as an nft table
+comment (``sourceknock:<path>''). On start and on reload the daemon deletes
+every ``inet sourceknock_*'' table that is not in its configuration and has its
+own mark, so a renamed or removed trigger does not leave its port closed. A
+table with no mark, or with the mark of another configuration, is never
+deleted: the daemon logs a warning that names it. The mark needs nftables with
+table comments (tested with nft 1.0.9, Linux 5.10 or later) and a path of at
+most 116 characters. A table made by an earlier version has no mark and is
+kept. Two triggers may not manage
+the same port and protocol on the same interface, or on any interfaces when
+either one uses
+.BR "close_on = all" .
 .SH MODES
 .RS 4
 .IP \(bu 2
@@ -136,8 +234,8 @@ seconds, then close.
 .BI fallback_ttl
 as a safety net.
 .IP
-For TCP the first packet to a service port (the connection's SYN) closes the
-port. For UDP there is no handshake, so the first subsequent UDP packet to a
+For TCP the first new connection (a SYN) to a service port closes the port;
+packets of a session that is already open do not. For UDP there is no handshake, so the first subsequent UDP packet to a
 service port closes it; the arming knock itself does not close the port the
 instant it opens.
 .IP \(bu 2
