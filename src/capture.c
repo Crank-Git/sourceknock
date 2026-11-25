@@ -3,6 +3,7 @@
  * local header pulls in. */
 #define _POSIX_C_SOURCE 200809L
 #include "capture.h"
+#include "retry.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -134,6 +135,7 @@ int capture_open(capture_t *cap, const char *iface, kn_packet_fn fn, void *arg)
                 "capture: interface '%s' does not exist (yet); retrying every "
                 "second\n",
                 iface);
+        cap->last_try = now_ts();
         return 1;
     }
     cap->fd = open_socket(iface, &cap->hatype, 0);
@@ -176,6 +178,13 @@ int capture_run(capture_t *caps, size_t n, volatile sig_atomic_t *stop,
              * port closed meanwhile; the other interfaces keep working. */
             if (caps[i].fd < 0)
             {
+                /* poll() wakes on every packet of the other interfaces, so
+                 * throttle here: a reopen is a few syscalls and must not run
+                 * once per packet. */
+                double now = now_ts();
+                if (!capture_retry_due(caps[i].last_try, now))
+                    continue;
+                caps[i].last_try = now;
                 caps[i].fd = open_socket(caps[i].interface, &caps[i].hatype, 1);
                 if (caps[i].fd >= 0)
                     fprintf(stderr, "capture: '%s' is up, listening\n",
@@ -201,6 +210,7 @@ int capture_run(capture_t *caps, size_t n, volatile sig_atomic_t *stop,
                         caps[i].interface, strerror(errno));
                 close(caps[i].fd);
                 caps[i].fd = -1;
+                caps[i].last_try = now_ts();
                 pfd[i].fd = -1; /* poll() ignores negative fds */
                 continue;
             }
