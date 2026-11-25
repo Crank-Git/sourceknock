@@ -123,13 +123,60 @@ static int emit(char *buf, size_t len, size_t *used, const char *fmt, ...)
     return 0;
 }
 
-int reward_script(char *buf, size_t len, const char *table, const char *iface,
+#define OWNER_PREFIX "sourceknock:"
+#define COMMENT_MAX 128 /* nft refuses a longer comment */
+
+int reward_owner_mark(char *out, size_t len, const char *config_path)
+{
+    size_t plen = strlen(OWNER_PREFIX);
+    size_t n = strlen(config_path);
+    if (n == 0 || plen + n > COMMENT_MAX || plen + n >= len)
+        return -1;
+    for (size_t i = 0; i < n; i++)
+    {
+        unsigned char c = (unsigned char)config_path[i];
+        if (c < 0x20 || c == 0x7f || c == '"' || c == '\\')
+            return -1;
+    }
+    memcpy(out, OWNER_PREFIX, plen);
+    memcpy(out + plen, config_path, n + 1);
+    return 0;
+}
+
+int reward_parse_owner(const char *listing, char *out, size_t len)
+{
+    /* Skip the "table inet NAME {" line; the table's comment is the next
+     * non-blank line when it exists. */
+    const char *p = strchr(listing, '\n');
+    if (!p)
+        return 0;
+    while (*p == '\n' || *p == ' ' || *p == '\t')
+        p++;
+    static const char key[] = "comment \"";
+    if (strncmp(p, key, strlen(key)) != 0)
+        return 0;
+    p += strlen(key);
+    const char *end = p;
+    while (*end && *end != '"' && *end != '\n')
+        end++;
+    if (*end != '"' || (size_t)(end - p) >= len)
+        return 0;
+    memcpy(out, p, (size_t)(end - p));
+    out[end - p] = '\0';
+    return 1;
+}
+
+int reward_script(char *buf, size_t len, const char *table,
+                  const char *config_path, const char *iface,
                   const uint16_t *ports, size_t n_ports, proto_t proto,
                   long max_allowed)
 {
     if (len == 0)
         return -1;
     buf[0] = '\0';
+    char owner[COMMENT_MAX + 1];
+    if (reward_owner_mark(owner, sizeof(owner), config_path) != 0)
+        return -1;
     size_t u = 0;
     const char *chain = "service";
     const char *v4 = "allowed_v4";
@@ -137,8 +184,10 @@ int reward_script(char *buf, size_t len, const char *table, const char *iface,
     int bad = 0; /* any emit() that did not fit */
 
     /* `add` is idempotent for an identical table/set/chain, so only a real
-     * conflict fails the transaction. */
-    bad |= emit(buf, len, &u, "add table %s\n", table);
+     * conflict fails the transaction. The comment marks the table as ours; on
+     * a table that already exists nft keeps the old comment. */
+    bad |=
+        emit(buf, len, &u, "add table %s { comment \"%s\"; }\n", table, owner);
 
     /* Per-family allowed sets (per-element timeout). */
     bad |= emit(buf, len, &u,
@@ -266,9 +315,9 @@ static int run_nft_script(const char *script)
     return 0;
 }
 
-int reward_init(reward_t *r, const char *table, const char *iface,
-                const uint16_t *ports, size_t n_ports, proto_t proto,
-                double fallback_ttl, long max_allowed)
+int reward_init(reward_t *r, const char *table, const char *config_path,
+                const char *iface, const uint16_t *ports, size_t n_ports,
+                proto_t proto, double fallback_ttl, long max_allowed)
 {
     memset(r, 0, sizeof(*r));
     strncpy(r->table, table, sizeof(r->table) - 1);
@@ -281,14 +330,15 @@ int reward_init(reward_t *r, const char *table, const char *iface,
     r->fallback_ttl = fallback_ttl > 0 ? fallback_ttl : 30.0;
 
     /* The fixed lines and each port's rules stay well inside these bounds
-     * (table and interface names are at most 64 bytes each). */
-    size_t cap = 1024 + n_ports * 640;
+     * (table and interface names are at most 64 bytes each, the owner mark
+     * 128). */
+    size_t cap = 1280 + n_ports * 640;
     char *script = malloc(cap);
     if (!script)
         return -1;
     char cmd[512];
-    int failed = reward_script(script, cap, r->table, iface, ports, n_ports,
-                               proto, max_allowed);
+    int failed = reward_script(script, cap, r->table, config_path, iface, ports,
+                               n_ports, proto, max_allowed);
     if (!failed)
         failed = run_nft_script(script);
     free(script);
@@ -380,8 +430,42 @@ int reward_destroy(reward_t *r)
     return run_nft_str(cmd);
 }
 
-int reward_prune_stale(const char *const *keep, size_t n_keep)
+/* Read all of a command's stdout (up to cap-1 bytes) into `buf`. Returns 0 on
+ * success, -1 when it cannot run or exits non-zero. */
+static int read_cmd(const char *cmd, char *buf, size_t cap)
 {
+    FILE *f = popen(cmd, "r");
+    if (!f)
+        return -1;
+    size_t used = 0, n;
+    char chunk[512];
+    while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0)
+    {
+        if (used + n >= cap)
+            n = cap - 1 - used; /* keep draining so nft does not get SIGPIPE */
+        memcpy(buf + used, chunk, n);
+        used += n;
+    }
+    buf[used] = '\0';
+    return pclose(f) == 0 ? 0 : -1;
+}
+
+/* Only characters that need no shell quoting: the name goes into a command. */
+static int safe_table_name(const char *name)
+{
+    for (const char *c = name; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+              (*c >= '0' && *c <= '9') || *c == '_' || *c == '-' || *c == '.'))
+            return 0;
+    return 1;
+}
+
+int reward_prune_stale(const char *config_path, const char *const *keep,
+                       size_t n_keep)
+{
+    char mine[COMMENT_MAX + 1];
+    if (reward_owner_mark(mine, sizeof(mine), config_path) != 0)
+        return -1;
     /* Same pinned PATH as run_nft(). */
     FILE *f =
         popen("PATH=/usr/sbin:/sbin:/usr/bin:/bin nft list tables inet", "r");
@@ -406,6 +490,29 @@ int reward_prune_stale(const char *const *keep, size_t n_keep)
             kept = strcmp(full, keep[i]) == 0;
         if (kept)
             continue;
+
+        /* Delete only a table that carries our mark. */
+        char owner[COMMENT_MAX + 1] = "";
+        int has_owner = 0;
+        if (safe_table_name(name))
+        {
+            char cmd[400];
+            char listing[4096];
+            snprintf(cmd, sizeof(cmd),
+                     "PATH=/usr/sbin:/sbin:/usr/bin:/bin nft list table inet "
+                     "%s 2>/dev/null",
+                     name);
+            if (read_cmd(cmd, listing, sizeof(listing)) == 0)
+                has_owner = reward_parse_owner(listing, owner, sizeof(owner));
+        }
+        if (!has_owner || strcmp(owner, mine) != 0)
+        {
+            fprintf(stderr,
+                    "reward: warning: table %s is not owned by this config "
+                    "(%s); leaving it\n",
+                    full, has_owner ? owner : "no owner mark");
+            continue;
+        }
         char cmd[320];
         snprintf(cmd, sizeof(cmd), "delete table %s", full);
         if (run_nft_str(cmd) == 0)

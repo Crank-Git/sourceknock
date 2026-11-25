@@ -55,6 +55,7 @@ SERVICE="$(awk -F= '/^[[:space:]]*service[[:space:]]*/{gsub(/[^A-Za-z0-9_]/,"",$
 
 cleanup() {
   sudo pkill -f 'sourceknock .*/sourceknock.conf' 2>/dev/null
+  sudo pkill -f "^$BIN $WORK/two[ab].conf\$" 2>/dev/null
   sudo pkill -f 'listener\.py' 2>/dev/null
   sudo ip netns del "$NS" 2>/dev/null
   sudo pkill -9 -x sourceknock 2>/dev/null
@@ -163,7 +164,12 @@ start_daemon() { # [conf]
 # A table left by a trigger that is no longer in the config (renamed or
 # removed) would keep dropping its port with nothing to open it: startup
 # removes it. Tables that aren't sourceknock's are left alone.
-sudo ip netns exec "$NS" nft add table inet sourceknock_stale
+# Only a table this config owns is removed: a table with no owner mark, or
+# the mark of another config, is left alone with a warning.
+OWNER_MARK="sourceknock:$(realpath "$CONF")"
+sudo ip netns exec "$NS" nft add table inet sourceknock_stale "{ comment \"$OWNER_MARK\"; }"
+sudo ip netns exec "$NS" nft add table inet sourceknock_unmarked
+sudo ip netns exec "$NS" nft add table inet sourceknock_foreign '{ comment "sourceknock:/etc/sourceknock/other.conf"; }'
 sudo ip netns exec "$NS" nft add chain inet sourceknock_stale service '{ type filter hook input priority 0; policy accept; }'
 sudo ip netns exec "$NS" nft add rule inet sourceknock_stale service tcp dport $((PORT+3)) drop
 sudo ip netns exec "$NS" nft add table inet keepme
@@ -175,6 +181,13 @@ if sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_stale; then ch
 if sudo ip netns exec "$NS" nft list tables | grep -q keepme; then check "other tables untouched" 1 1; else check "other tables untouched" 1 0; fi
 grep -q "removed stale table inet sourceknock_stale" "$LOG" && check "stale table removal logged" 1 1 || check "stale table removal logged" 1 0
 sudo ip netns exec "$NS" nft delete table inet keepme
+sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_unmarked && check "table with no owner mark kept" 1 1 || check "table with no owner mark kept" 1 0
+sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_foreign && check "table of another config kept" 1 1 || check "table of another config kept" 1 0
+grep -q "warning: table inet sourceknock_unmarked is not owned by this config (no owner mark)" "$LOG" && check "unmarked table warned about" 1 1 || check "unmarked table warned about" 1 0
+grep -q "warning: table inet sourceknock_foreign is not owned by this config (sourceknock:/etc/sourceknock/other.conf)" "$LOG" && check "foreign table warned about" 1 1 || check "foreign table warned about" 1 0
+sudo ip netns exec "$NS" nft list table inet "sourceknock_$SERVICE" | grep -q "comment \"$OWNER_MARK\"" && check "daemon's table carries the owner mark" 1 1 || check "daemon's table carries the owner mark" 1 0
+sudo ip netns exec "$NS" nft delete table inet sourceknock_unmarked
+sudo ip netns exec "$NS" nft delete table inet sourceknock_foreign
 
 if wait $PRE_HOLD; then check "pre-start connection survives daemon start" 1 1; else check "pre-start connection survives daemon start" 1 0; cat "$WORK/pre_hold.log"; fi
 
@@ -569,6 +582,55 @@ if [ -n "$first_ts" ]; then
 else
   check "log has timestamps" 1 0
 fi
+
+# Two daemons with different configs run side by side (the template unit does
+# this). Each deletes only the stale tables it owns, so neither start nor
+# reload may remove the other's tables.
+echo "--- two daemons, two configs ---"
+TWO_A=$((PORT+21)); TWO_B=$((PORT+22))
+for i in A B; do
+  sudo ip netns exec "$NS" ip link add "sk${i}0" type veth peer name "sk${i}1"
+  sudo ip netns exec "$NS" ip link set "sk${i}0" up
+  sudo ip netns exec "$NS" ip link set "sk${i}1" up
+done
+two_conf() { # file interface service port
+  printf '[global]\ninterface = %s\n[trigger:%s]\nport = %s\nsequence = %s\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$2" "$3" "$4" "$SEQ" > "$1"
+}
+two_start() { # name   (config $WORK/<name>.conf, log $WORK/<name>.log)
+  : > "$WORK/$1.log"
+  sudo ip netns exec "$NS" setsid "$BIN" "$WORK/$1.conf" >"$WORK/$1.log" 2>&1 </dev/null &
+  for _ in $(seq 1 50); do grep -q "listening for knocks" "$WORK/$1.log" && return 0; sleep 0.1; done
+  return 1
+}
+two_reload() { # name
+  local n0; n0=$(grep -c "reload: applied" "$WORK/$1.log")
+  sudo pkill -HUP -f "^$BIN $WORK/$1.conf\$"
+  for _ in $(seq 1 50); do [ "$(grep -c "reload: applied" "$WORK/$1.log")" -gt "$n0" ] && return 0; sleep 0.1; done
+  return 1
+}
+two_has() { sudo ip netns exec "$NS" nft list chain inet "sourceknock_$1" service 2>/dev/null | grep -q "dport $2 drop"; }
+two_conf "$WORK/twoa.conf" skA0 twoa "$TWO_A"
+two_conf "$WORK/twob.conf" skB0 twob "$TWO_B"
+two_start twoa && two_start twob || { echo "FAIL two daemons never started"; cat "$WORK/twoa.log" "$WORK/twob.log"; fail=$((fail+1)); }
+if two_has twoa "$TWO_A" && two_has twob "$TWO_B"; then check "second daemon's start keeps the first one's table" 1 1; else check "second daemon's start keeps the first one's table" 1 0; cat "$WORK/twob.log"; fi
+grep -q "removed stale table" "$WORK/twob.log" && check "second daemon removes nothing at start" 0 1 || check "second daemon removes nothing at start" 0 0
+two_reload twoa && two_reload twob || { echo "FAIL reload never applied"; cat "$WORK/twoa.log" "$WORK/twob.log"; fail=$((fail+1)); }
+if two_has twoa "$TWO_A" && two_has twob "$TWO_B"; then check "reload of each daemon keeps both tables" 1 1; else check "reload of each daemon keeps both tables" 1 0; cat "$WORK/twoa.log" "$WORK/twob.log"; fi
+grep -q "removed stale table" "$WORK/twoa.log" "$WORK/twob.log" && check "reload removes nothing it does not own" 0 1 || check "reload removes nothing it does not own" 0 0
+sudo ip netns exec "$NS" nft list table inet sourceknock_twoa | grep -q "comment \"sourceknock:$(realpath "$WORK/twoa.conf")\"" && check "each table carries its own config's mark" 1 1 || check "each table carries its own config's mark" 1 0
+
+# A trigger renamed in one daemon's config still loses its old table, and
+# only that table.
+two_conf "$WORK/twoa.conf" skA0 twoa2 "$TWO_A"
+two_reload twoa || { echo "FAIL rename reload never applied"; cat "$WORK/twoa.log"; fail=$((fail+1)); }
+if sudo ip netns exec "$NS" nft list tables | grep -q "sourceknock_twoa$"; then check "renamed trigger's old table removed" 1 0; else check "renamed trigger's old table removed" 1 1; fi
+two_has twoa2 "$TWO_A" && check "renamed trigger's new table in place" 1 1 || check "renamed trigger's new table in place" 1 0
+two_has twob "$TWO_B" && check "other daemon's table survives the rename" 1 1 || check "other daemon's table survives the rename" 1 0
+grep -q "removed stale table inet sourceknock_twoa " "$WORK/twoa.log" && check "rename removal logged" 1 1 || check "rename removal logged" 1 0
+sudo pkill -TERM -f "^$BIN $WORK/two[ab].conf\$"
+sleep 0.5
+for t in twoa2 twob; do sudo ip netns exec "$NS" nft delete table inet "sourceknock_$t" 2>/dev/null; done
+for i in A B; do sudo ip netns exec "$NS" ip link del "sk${i}0" 2>/dev/null; done
 
 # SIGTERM on an idle interface: the daemon must exit promptly and cleanly
 # (exit 0) and flush its allowed sets on the way out.

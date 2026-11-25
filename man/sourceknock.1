@@ -177,9 +177,16 @@ or not there yet does not stop the daemon: that trigger's ports stay closed
 and knocks are read there again once it is up.
 .RE
 .PP
-Run one daemon per host. On start it deletes every
-``inet sourceknock_*'' table that is not in its configuration, so a renamed
-or removed trigger does not leave its port closed. Two triggers may not manage
+Several daemons may run on one host, each with its own configuration.
+Every table carries the absolute path of its configuration as an nft table
+comment (``sourceknock:<path>''). On start and on reload the daemon deletes
+every ``inet sourceknock_*'' table that is not in its configuration and has its
+own mark, so a renamed or removed trigger does not leave its port closed. A
+table with no mark, or with the mark of another configuration, is never
+deleted: the daemon logs a warning that names it. The mark needs nftables with
+table comments (tested with nft 1.0.9, Linux 5.10 or later) and a path of at
+most 116 characters. A table made by an earlier version has no mark and is
+kept. Two triggers may not manage
 the same port and protocol on the same interface.
 .SH MODES
 .RS 4

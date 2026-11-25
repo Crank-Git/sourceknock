@@ -66,11 +66,30 @@ running config is kept. A good one is applied in place: clients already let in
 stay in (a restart would drop them), new triggers get their tables, and removed
 triggers' tables are deleted.
 
-Run one daemon per host: a single config covers every service and interface
-(one `[trigger:...]` per service, each with its own `interface` if needed). On
-start the daemon deletes any `inet sourceknock_*` table that isn't in its
-config, so a trigger you renamed or removed doesn't leave its port closed
-behind it; a second daemon would delete the first one's tables.
+Each daemon marks every table it creates with the absolute path of its config
+as an nft table comment (`sourceknock:/etc/sourceknock/myconf.conf`). On start
+and on reload the daemon deletes any `inet sourceknock_*` table that is not in
+its config and carries its own mark, so a trigger you renamed or removed does
+not leave its port closed behind it. A table with no mark, or with the mark of
+another config, is never deleted: the daemon logs one warning that names it.
+So you can run several daemons on one host (for example
+`sourceknock@web` and `sourceknock@ssh`), each with its own config. Give the
+configs different `service` names, because a table name must be unique.
+
+Requirements and limits:
+
+- nftables with table comments. This was tested with nft 1.0.9; the kernel
+  support for comments is in Linux 5.10 and later. If `nft` rejects the
+  comment, the daemon refuses to start and says so.
+- The absolute config path may have at most 116 characters, and no quote,
+  backslash or control character, because nft limits a comment to 128
+  characters. The daemon refuses a longer path.
+- `add table` does not change the comment of a table that exists already. A
+  table made by an earlier version has no mark, so the daemon keeps it and
+  warns. Delete it once (`nft delete table inet sourceknock_<service>`) and
+  reload to get a marked table. Moving or renaming a config file changes its
+  mark in the same way: the tables with the old mark stay until you delete
+  them.
 
 Stop / remove:
 
