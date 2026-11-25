@@ -126,7 +126,7 @@ sourceknock-knock -K KEYFILE [-r] [options] HOST
 sourceknock-knock -6 -p 4444 server.example.com 7000,8000,9000
 ```
 
-The daemon takes the config path, and reads `/etc/sourceknock/sourceknock.conf` without one. Check a config with `sourceknock -t <path>` before restarting: if the daemon refuses a new config, the old tables keep the ports closed. The template unit runs one daemon per config: `systemctl enable --now sourceknock@myconf` reads `/etc/sourceknock/myconf.conf`. Run one daemon per host: one config covers every service and interface. To apply config changes, `systemctl reload sourceknock` (SIGHUP): a bad config is refused and the running one kept, and clients already let in stay in.
+The daemon takes the config path, and reads `/etc/sourceknock/sourceknock.conf` without one. Check a config with `sourceknock -t <path>` before restarting: if the daemon refuses a new config, the old tables keep the ports closed. The template unit runs one daemon per config: `systemctl enable --now sourceknock@myconf` reads `/etc/sourceknock/myconf.conf`. Several daemons may run on one host, each with its own config: every table carries the absolute path of its config as an owner mark (an nft table comment, `sourceknock:<path>`), and a daemon deletes only the stale tables it owns. This needs nftables with table comments (tested with nft 1.0.9; the kernel feature is in Linux 5.10 and later) and a config path of at most 116 characters. Give each config its own `service` names, since a table name must not be shared. To apply config changes, `systemctl reload sourceknock` (SIGHUP): a bad config is refused and the running one kept, and clients already let in stay in.
 
 ## How it works
 

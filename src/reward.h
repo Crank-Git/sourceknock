@@ -39,12 +39,29 @@ typedef struct
     int initialized;
 } reward_t;
 
+/* Write the owner mark for the config at `config_path` into `out`:
+ * "sourceknock:<path>". Every table the daemon creates carries it as its nft
+ * comment, so a daemon can tell its own tables from those of another config.
+ * Returns 0, or -1 when `config_path` is empty, holds a quote, backslash or
+ * control character (it would break the script's quoting), or the mark is
+ * longer than the 128 characters nft allows in a comment or than `len`. */
+int reward_owner_mark(char *out, size_t len, const char *config_path);
+
+/* Read the owner mark from the text of `nft list table`: the table's own
+ * comment, which nft prints first inside the braces. Copies it to `out` and
+ * returns 1. Returns 0 when the table has no comment or it does not fit `len`
+ * (a cut-off mark must never compare equal to ours). Pure: it only parses. */
+int reward_parse_owner(const char *listing, char *out, size_t len);
+
 /* Write the nft script that programs one trigger's table into `buf`: the
- * table, both sets, the chain and every rule, one command per line. Returns 0,
- * or -1 when `len` is too small (the script is never truncated silently).
+ * table (with the owner mark of `config_path` as its comment), both sets, the
+ * chain and every rule, one command per line. Returns 0, or -1 when `len` is
+ * too small (the script is never truncated silently) or `config_path` is not
+ * a valid owner (see reward_owner_mark).
  * `reward_init` feeds this script to `nft -f -`, so nft applies it as one
  * transaction. It is public so tests can check the exact text. */
-int reward_script(char *buf, size_t len, const char *table, const char *iface,
+int reward_script(char *buf, size_t len, const char *table,
+                  const char *config_path, const char *iface,
                   const uint16_t *ports, size_t n_ports, proto_t proto,
                   long max_allowed);
 
@@ -53,12 +70,16 @@ int reward_script(char *buf, size_t len, const char *table, const char *iface,
  * the table is removed again and the call returns -1.
  * `table` is the full nft table name (e.g. "inet sourceknock_ssh"); callers
  * must give each trigger a distinct name so multiple triggers don't clobber
- * each other's rules. The drop rules match only packets arriving on `iface`.
+ * each other's rules. `config_path` is the absolute path of the daemon's
+ * config: it becomes the table's owner mark. `add table` does not change the
+ * comment of a table that already exists, so a table made without a mark (by an
+ * older version) stays unmarked. The drop rules match only packets arriving on
+ * `iface`.
  * Each allowed set holds at most `max_allowed` addresses (re-running it with a
  * new size resizes the sets and keeps their elements). */
-int reward_init(reward_t *r, const char *table, const char *iface,
-                const uint16_t *ports, size_t n_ports, proto_t proto,
-                double fallback_ttl, long max_allowed);
+int reward_init(reward_t *r, const char *table, const char *config_path,
+                const char *iface, const uint16_t *ports, size_t n_ports,
+                proto_t proto, double fallback_ttl, long max_allowed);
 
 /* Open the port for `ip`. `family` is AF_INET or AF_INET6 and `ip` points at
  * the matching address struct. `timeout` is the kernel-enforced lifetime of the
@@ -78,10 +99,14 @@ int reward_flush(reward_t *r);
  * never exits leaving a service port closed with nothing to open it. */
 int reward_destroy(reward_t *r);
 
-/* Delete every "inet sourceknock_*" table not named in `keep` (full names, as
- * in reward_t.table). A trigger that was renamed or removed from the config
- * leaves its table behind, still dropping its ports with nothing left to open
- * them. Assumes one daemon per host. Returns 0, or -1 if anything failed. */
-int reward_prune_stale(const char *const *keep, size_t n_keep);
+/* Delete every "inet sourceknock_*" table that this config owns and that is
+ * not named in `keep` (full names, as in reward_t.table). A trigger that was
+ * renamed or removed leaves its table behind, still dropping its ports with
+ * nothing left to open them. A table is this config's when its owner mark
+ * equals the mark of `config_path`. A table with no mark, or the mark of
+ * another config, belongs to someone else: it is left alone and one warning
+ * names it. Returns 0, or -1 if anything failed. */
+int reward_prune_stale(const char *config_path, const char *const *keep,
+                       size_t n_keep);
 
 #endif /* SOURCEKNOCK_REWARD_H */

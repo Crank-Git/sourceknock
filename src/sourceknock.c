@@ -13,6 +13,7 @@
  * kept; a good one is applied without dropping clients already let in.
  */
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700 /* realpath() */
 #include "capture.h"
 #include "close.h"
 #include "config.h"
@@ -23,6 +24,7 @@
 #include "totp.h"
 
 #include <arpa/inet.h>
+#include <limits.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -31,6 +33,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Absolute path of the running config: the owner mark of every table. */
+static char g_config_abs[PATH_MAX];
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_reload = 0;
@@ -426,7 +431,7 @@ static void prune(const daemon_t *d)
     }
     for (size_t i = 0; i < d->n_triggers; i++)
         keep[i] = d->ts[i].reward.table;
-    reward_prune_stale(keep, d->n_triggers);
+    reward_prune_stale(g_config_abs, keep, d->n_triggers);
     free(keep);
 }
 
@@ -490,8 +495,8 @@ static int daemon_build(daemon_t *d, daemon_t *live, capture_t **caps_out,
         if (config_weak_sequence(tr, why, sizeof(why)))
             sk_log("[%s] warning: %s", tr->service, why);
 
-        if (reward_init(&t->reward, table, tr->interface, tr->ports,
-                        tr->n_ports, tr->protocol, tr->fallback_ttl,
+        if (reward_init(&t->reward, table, g_config_abs, tr->interface,
+                        tr->ports, tr->n_ports, tr->protocol, tr->fallback_ttl,
                         tr->max_allowed) != 0)
         {
             fprintf(stderr, "reward init failed for trigger '%s'\n",
@@ -585,8 +590,8 @@ static void restore_rules(daemon_t *d)
         char
             table[sizeof(t->reward.table)]; /* reward_init() clears t->reward */
         strcpy(table, t->reward.table);
-        if (reward_init(&t->reward, table, tr->interface, tr->ports,
-                        tr->n_ports, tr->protocol, tr->fallback_ttl,
+        if (reward_init(&t->reward, table, g_config_abs, tr->interface,
+                        tr->ports, tr->n_ports, tr->protocol, tr->fallback_ttl,
                         tr->max_allowed) != 0)
             sk_log("[%s] could not restore its nft table", tr->service);
     }
@@ -702,6 +707,21 @@ int main(int argc, char **argv)
     if (g_cfg.n_triggers == 0)
     {
         fprintf(stderr, "config '%s': no [trigger] sections\n", path);
+        return 1;
+    }
+
+    /* The config's absolute path marks every table this daemon creates, so
+     * two daemons with different configs never delete each other's tables. */
+    char mark[160];
+    if (!realpath(path, g_config_abs) ||
+        reward_owner_mark(mark, sizeof(mark), g_config_abs) != 0)
+    {
+        fprintf(stderr,
+                "config '%s': its absolute path cannot mark nft tables (at "
+                "most 116 characters, no quote, backslash or control "
+                "character)\n",
+                path);
+        config_free();
         return 1;
     }
 
