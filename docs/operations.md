@@ -76,11 +76,17 @@ So you can run several daemons on one host (for example
 `sourceknock@web` and `sourceknock@ssh`), each with its own config. Give the
 configs different `service` names, because a table name must be unique.
 
+The check that refuses two triggers on one port runs per config. Two daemons
+must not manage the same port: each daemon's table drops the port, so a knock
+that opens it in one table leaves the other table dropping it. A trigger with `close_on = all` drops its port on every interface, so it
+also drops that port for any other daemon that manages it.
+
 Requirements and limits:
 
 - nftables with table comments. This was tested with nft 1.0.9; the kernel
   support for comments is in Linux 5.10 and later. If `nft` rejects the
-  comment, the daemon refuses to start and says so.
+  comment, the daemon refuses to start. It logs `reward: nft -f - failed`
+  and `could not program nftables table`, with the `nft` error above them.
 - The absolute config path may have at most 116 characters, and no quote,
   backslash or control character, because nft limits a comment to 128
   characters. The daemon refuses a longer path.

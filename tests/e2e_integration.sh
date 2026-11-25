@@ -155,9 +155,17 @@ python3 "$DRIVER" hold "$SERVER" "$PORT" 3 "$WORK/pre_up" >"$WORK/pre_hold.log" 
 PRE_HOLD=$!
 wait_file "$WORK/pre_up" || echo "pre-start hold never connected"
 
+# A stand-in `nft` that fails every `nft -f -` run while $WORK/nft_fail exists,
+# so a test can make the daemon's table programming fail. The daemon starts
+# with it first in PATH; every other call goes to the real nft.
+REAL_NFT="$(command -v nft)"
+mkdir -p "$WORK/shim"
+printf '#!/bin/sh\nif [ -e "%s/nft_fail" ] && [ "$1 $2" = "-f -" ]; then cat >/dev/null; echo "nft: forced failure" >&2; exit 1; fi\nexec "%s" "$@"\n' "$WORK" "$REAL_NFT" > "$WORK/shim/nft"
+chmod +x "$WORK/shim/nft"
+
 start_daemon() { # [conf]
   : > "$LOG"
-  sudo ip netns exec "$NS" setsid "$BIN" "${1:-${RUNCONF:-$CONF}}" >"$LOG" 2>&1 </dev/null &
+  sudo ip netns exec "$NS" env PATH="$WORK/shim:$PATH" setsid "$BIN" "${1:-${RUNCONF:-$CONF}}" >"$LOG" 2>&1 </dev/null &
   DAEMON_PID=$!
   for _ in $(seq 1 50); do grep -q "listening for knocks" "$LOG" 2>/dev/null && return 0; sleep 0.1; done
   return 1
@@ -629,6 +637,20 @@ if [ $(( $(date +%s) / 30 )) -eq "$STEP0" ]; then
   kk replay2 -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
   totp_set | grep -q "$CLIENT" && check "used step still refused after reload" 0 1 || check "used step still refused after reload" 0 0
 fi
+
+# A reload whose nft run fails must leave the live table alone: the drop rules
+# stay and the clients already let in stay in. (The stand-in nft fails the run.)
+echo "--- reload whose nft run fails ---"
+sudo ip netns exec "$NS" nft flush set inet sourceknock_totpe2e allowed_v4
+sudo ip netns exec "$NS" nft add element inet sourceknock_totpe2e allowed_v4 "{ $CLIENT timeout 300s }"
+n0=$(grep -c "could not apply the new config" "$LOG")
+touch "$WORK/nft_fail"
+sudo pkill -HUP -x sourceknock
+for _ in $(seq 1 50); do [ "$(grep -c "could not apply the new config" "$LOG")" -gt "$n0" ] && break; sleep 0.1; done
+rm -f "$WORK/nft_fail"
+[ "$(grep -c "could not apply the new config" "$LOG")" -gt "$n0" ] && check "failed reload is refused" 1 1 || { check "failed reload is refused" 1 0; tail -8 "$LOG"; }
+sudo ip netns exec "$NS" nft list chain inet sourceknock_totpe2e service 2>/dev/null | grep -q "dport $TOTP_PORT drop" && check "failed reload keeps the drop rules" 1 1 || check "failed reload keeps the drop rules" 1 0
+totp_set | grep -q "$CLIENT" && check "failed reload keeps the allowed clients" 1 1 || check "failed reload keeps the allowed clients" 1 0
 
 # Log timestamps are wall-clock time (not time since boot).
 echo "--- log timestamps ---"

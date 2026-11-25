@@ -359,7 +359,7 @@ static int load_keys(unsigned char (*keys)[TOTP_KEY_MAX], size_t *keylens)
         char err[320];
         if (tr->secret_file[0] &&
             totp_key_mode_warning(tr->secret_file, err, sizeof(err)))
-            fprintf(stderr, "[%s] warning: %s\n", tr->service, err);
+            sk_log("[%s] warning: %s", tr->service, err);
         if (tr->secret_file[0] &&
             totp_load_key(tr->secret_file, keys[i], &keylens[i], err,
                           sizeof(err)) != 0)

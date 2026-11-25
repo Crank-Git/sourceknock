@@ -776,6 +776,32 @@ static void test_open_interfaces_warning(void)
                  0);
 }
 
+/* A long interface list never pushes the advice out of the 320-byte message
+ * the daemon passes in. */
+static void test_open_interfaces_warning_long_list(void)
+{
+    char err[256], msg[320];
+    const char *c = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "interface = eth0\n";
+    CHECK_EQ_INT(parse(c, err, sizeof(err)), 0);
+    const char *names[40];
+    char buf[40][16];
+    names[0] = "eth0";
+    for (int i = 1; i < 40; i++)
+    {
+        snprintf(buf[i], sizeof(buf[i]), "veth%07d", i);
+        names[i] = buf[i];
+    }
+    CHECK_EQ_INT(config_open_interfaces_warning(&g_cfg.triggers[0], names, 40,
+                                                msg, sizeof(msg)),
+                 1);
+    CHECK(strlen(msg) < sizeof(msg) - 1);
+    CHECK(strstr(msg, "veth0000001") != NULL);
+    CHECK(strstr(msg, "; set close_on = all to block them") != NULL);
+    const char *tail = "; set close_on = all to block them";
+    CHECK_EQ_STR(msg + strlen(msg) - strlen(tail), tail);
+}
+
 /* Only interfaces that are up stay in the list; the order is kept. */
 static void test_keep_up_interfaces(void)
 {
@@ -841,6 +867,7 @@ int main(void)
     TEST_RUN(test_close_on_bad_value);
     TEST_RUN(test_close_on_all_shared_port);
     TEST_RUN(test_open_interfaces_warning);
+    TEST_RUN(test_open_interfaces_warning_long_list);
     TEST_RUN(test_keep_up_interfaces);
     config_free();
     TEST_SUMMARY();
