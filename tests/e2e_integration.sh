@@ -135,9 +135,12 @@ grep -q "could not program nftables" "$WORK/refuse.log" && check "no CAP_NET_ADM
 
 
 # An nft object the daemon can't reconcile (allowed_v4 with the wrong type).
-sudo ip netns exec "$NS" nft add table inet "sourceknock_$SERVICE"
+# The table is one a previous run of this config left behind, so it carries
+# this config's owner mark: a failed startup must remove it, or its port would
+# stay closed with no daemon to open it.
+sudo ip netns exec "$NS" nft add table inet "sourceknock_$SERVICE" "{ comment \"sourceknock:$(realpath "$CONF")\"; }"
 sudo ip netns exec "$NS" nft add set inet "sourceknock_$SERVICE" allowed_v4 '{ type ipv6_addr; }'
-KEEP=1 expect_refuse "conflicting nft set" "$CONF"
+expect_refuse "conflicting nft set" "$CONF"
 
 # Second trigger fails after the first was fully programmed: the first
 # trigger's table must be removed too, or its drop rule would lock the port.

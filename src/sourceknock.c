@@ -614,6 +614,10 @@ fail:
          * a service port closed with no daemon to open it. */
         for (size_t i = 0; i < d->n_triggers; i++)
             reward_destroy(&d->ts[i].reward);
+        /* A failed reward_init() deletes nothing, so a table that a previous
+         * run of this config left behind (drop rules included) is still
+         * there. Remove every table that carries this config's mark. */
+        reward_prune_stale(g_config_abs, NULL, 0);
     }
     if (d->ts)
         daemon_free(d, caps, n_caps);
