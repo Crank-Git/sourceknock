@@ -343,6 +343,7 @@ int reward_init(reward_t *r, const char *table, const char *config_path,
     char *script = malloc(cap);
     if (!script)
         return -1;
+    char cmd[512];
     int failed = reward_script(script, cap, r->table, config_path, iface,
                                close_on, ports, n_ports, proto, max_allowed);
     if (!failed)
@@ -351,10 +352,10 @@ int reward_init(reward_t *r, const char *table, const char *config_path,
 
     if (failed)
     {
-        /* The script is one nft transaction, so a failed run applied nothing:
-         * no half-built table exists. Do not delete the table. On a reload it
-         * is the live one, and deleting it would open the port and empty the
-         * allowed sets. */
+        /* Don't leave a half-built table behind: a drop rule without its
+         * accept rules would lock everyone out with no daemon running. */
+        snprintf(cmd, sizeof(cmd), "delete table %s", r->table);
+        run_nft_cmd(cmd, 1);
         fprintf(stderr,
                 "reward: could not program nftables table %s (is nft "
                 "installed, and do we have CAP_NET_ADMIN?)\n",

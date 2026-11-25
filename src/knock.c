@@ -128,6 +128,8 @@ static int state_read(const char *path, long *last)
 static int state_write(const char *path, long step)
 {
     char dir[PATH_MAX];
+    if (strlen(path) >= sizeof(dir))
+        return -1;
     snprintf(dir, sizeof(dir), "%s", path);
     char *slash = strrchr(dir, '/');
     if (slash)
