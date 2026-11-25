@@ -441,6 +441,13 @@ for CO in interface all; do
   else
     grep -q "close_on" "$WORK/co_t.log" && check "-t: close_on = all gives no warning" 1 0 || check "-t: close_on = all gives no warning" 1 1
   fi
+  if [ "$CO" = "interface" ]; then
+    sudo ip netns exec "$NS" ip link set e2e-s2 down
+    sudo ip netns exec "$NS" "$BIN" -t "$WORK/co.conf" >"$WORK/co_t_down.log" 2>&1
+    grep -q "e2e-s2" "$WORK/co_t_down.log" && { check "-t omits the second interface when it is down" 1 0; cat "$WORK/co_t_down.log"; } || check "-t omits the second interface when it is down" 1 1
+    sudo ip netns exec "$NS" ip link set e2e-s2 up
+    sudo ip netns exec "$NS" ip addr replace 10.21.0.2/24 dev e2e-s2
+  fi
   start_daemon "$WORK/co.conf" || { echo "FAIL close_on daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); }
   if [ "$CO" = "interface" ]; then
     grep -q "warning: close_on = interface leaves its ports open on .*e2e-s2" "$LOG" && check "start warns about the open second interface" 1 1 || { check "start warns about the open second interface" 1 0; cat "$LOG"; }

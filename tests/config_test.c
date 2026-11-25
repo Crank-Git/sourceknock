@@ -776,6 +776,32 @@ static void test_open_interfaces_warning(void)
                  0);
 }
 
+/* Only interfaces that are up stay in the list; the order is kept. */
+static void test_keep_up_interfaces(void)
+{
+    const char *names[] = {"lo", "eth0", "eth1", "wg0"};
+    int flags[] = {1, 1, 0, 1};
+    CHECK_EQ_INT((int)config_keep_up_interfaces(names, flags, 4), 3);
+    CHECK_EQ_STR(names[0], "lo");
+    CHECK_EQ_STR(names[1], "eth0");
+    CHECK_EQ_STR(names[2], "wg0");
+
+    /* the builder lists only the names it gets: a down eth1 is not named */
+    char err[256], msg[320];
+    const char *c = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "interface = eth0\n";
+    CHECK_EQ_INT(parse(c, err, sizeof(err)), 0);
+    CHECK_EQ_INT(config_open_interfaces_warning(&g_cfg.triggers[0], names, 3,
+                                                msg, sizeof(msg)),
+                 1);
+    CHECK_EQ_STR(msg, "close_on = interface leaves its ports open on wg0; "
+                      "set close_on = all to block them");
+
+    const char *down[] = {"eth1"};
+    int dflags[] = {0};
+    CHECK_EQ_INT((int)config_keep_up_interfaces(down, dflags, 1), 0);
+}
+
 int main(void)
 {
     printf("== config parser tests ==\n");
@@ -815,6 +841,7 @@ int main(void)
     TEST_RUN(test_close_on_bad_value);
     TEST_RUN(test_close_on_all_shared_port);
     TEST_RUN(test_open_interfaces_warning);
+    TEST_RUN(test_keep_up_interfaces);
     config_free();
     TEST_SUMMARY();
 }

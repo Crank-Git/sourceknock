@@ -14,6 +14,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700 /* realpath() */
+#define _DEFAULT_SOURCE /* IFF_UP, getifaddrs() */
 #include "capture.h"
 #include "close.h"
 #include "config.h"
@@ -24,6 +25,7 @@
 #include "totp.h"
 
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <limits.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -370,26 +372,41 @@ static int load_keys(unsigned char (*keys)[TOTP_KEY_MAX], size_t *keylens)
 }
 
 /* The warning for a trigger whose ports stay open on the host's other
- * interfaces (see config_open_interfaces_warning). Returns 1 with the text in
- * `msg`, else 0. */
+ * interfaces that are up (see config_open_interfaces_warning). Returns 1 with
+ * the text in `msg`, else 0. */
 static int open_interfaces_warning(const trigger_t *tr, char *msg, size_t n)
 {
-    struct if_nameindex *all = if_nameindex();
-    if (!all)
+    struct ifaddrs *all;
+    if (getifaddrs(&all) != 0)
         return 0;
     size_t count = 0;
-    while (all[count].if_index != 0)
+    for (struct ifaddrs *a = all; a; a = a->ifa_next)
         count++;
     int warn = 0;
     const char **names = calloc(count ? count : 1, sizeof(*names));
-    if (names)
+    int *flags = calloc(count ? count : 1, sizeof(*flags));
+    if (names && flags)
     {
-        for (size_t i = 0; i < count; i++)
-            names[i] = all[i].if_name;
-        warn = config_open_interfaces_warning(tr, names, count, msg, n);
-        free(names);
+        /* getifaddrs() lists an interface once per address; keep one entry
+         * per name. */
+        size_t k = 0;
+        for (struct ifaddrs *a = all; a; a = a->ifa_next)
+        {
+            size_t j = 0;
+            while (j < k && strcmp(names[j], a->ifa_name) != 0)
+                j++;
+            if (j == k)
+            {
+                names[k] = a->ifa_name;
+                flags[k++] = (a->ifa_flags & IFF_UP) != 0;
+            }
+        }
+        k = config_keep_up_interfaces(names, flags, k);
+        warn = config_open_interfaces_warning(tr, names, k, msg, n);
     }
-    if_freenameindex(all);
+    free(names);
+    free(flags);
+    freeifaddrs(all);
     return warn;
 }
 

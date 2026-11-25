@@ -88,6 +88,11 @@ int config_open_interfaces_warning(const trigger_t *tr,
                                    const char *const *ifaces, size_t n,
                                    char *msg, size_t msglen);
 
+/* Compacts `names` in place to the entries whose `up` flag is set, keeping
+ * the order. Returns the new count. The caller sets `up` from IFF_UP. Pure: a
+ * down interface carries no traffic, so the warning leaves it out. */
+size_t config_keep_up_interfaces(const char **names, const int *up, size_t n);
+
 extern config_t g_cfg; /* populated by the above; used by the daemon */
 
 #endif /* SOURCEKNOCK_CONFIG_H */

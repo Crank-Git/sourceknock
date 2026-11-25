@@ -194,7 +194,7 @@ the drop rules match only the trigger's interface, so the port stays open on
 the host's other interfaces. At start, at reload and in
 .B \-t
 the daemon logs one warning for each such trigger. It names the other
-interfaces (not
+interfaces that are up (not
 .BR lo )
 and says to set
 .BR "close_on = all" .

@@ -82,8 +82,8 @@ closed port sends, so a scan still sees nothing.
     above). A host with a second public interface, or with IPv6 on another
     interface, keeps the port open there with no knock. At start, at reload
     and in `sourceknock -t`, the daemon logs one warning for each such trigger.
-    It lists the other interfaces on the host (not `lo`) and says to set
-    `close_on = all`:
+    It lists the other interfaces on the host that are up (not `lo`) and says
+    to set `close_on = all`:
     `[ssh] warning: close_on = interface leaves its ports open on eth1; set close_on = all to block them`.
   - `all`: the drop rules have no interface match, so the port is closed on
     every interface, including `lo`. Local clients on the host need a knock
