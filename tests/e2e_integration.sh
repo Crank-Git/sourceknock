@@ -119,12 +119,17 @@ expect_refuse() { # label conf [nocap]
   sudo ip netns exec "$NS" nft flush ruleset
 }
 
+echo "--- config check (-t) ---"
+# Runs in the daemon's namespace (where e2e-s lives); never touches nftables.
+if sudo ip netns exec "$NS" "$BIN" -t "$CONF" >/dev/null 2>&1; then check "-t accepts a good config" 1 1; else check "-t accepts a good config" 1 0; fi
+sed 's/^interface = .*/interface = sk-nosuch0/' "$CONF" > "$WORK/badif_t.conf"
+if sudo ip netns exec "$NS" "$BIN" -t "$WORK/badif_t.conf" >/dev/null 2>&1; then check "-t rejects a missing interface" 0 1; else check "-t rejects a missing interface" 0 0; fi
+if [ "$(nft_tables)" = "0" ]; then check "-t leaves nftables alone" 1 1; else check "-t leaves nftables alone" 1 0; fi
+
 echo "--- startup failures ---"
 expect_refuse "no CAP_NET_ADMIN" "$CONF" nocap
 grep -q "could not program nftables" "$WORK/refuse.log" && check "no CAP_NET_ADMIN: says why" 1 1 || check "no CAP_NET_ADMIN: says why" 1 0
 
-sed 's/^interface = .*/interface = sk-nosuch0/' "$CONF" > "$WORK/badif.conf"
-expect_refuse "unknown interface" "$WORK/badif.conf"
 
 # An nft object the daemon can't reconcile (allowed_v4 with the wrong type).
 sudo ip netns exec "$NS" nft add table inet "sourceknock_$SERVICE"
@@ -148,20 +153,39 @@ python3 "$DRIVER" hold "$SERVER" "$PORT" 3 "$WORK/pre_up" >"$WORK/pre_hold.log" 
 PRE_HOLD=$!
 wait_file "$WORK/pre_up" || echo "pre-start hold never connected"
 
-start_daemon() {
+start_daemon() { # [conf]
   : > "$LOG"
-  sudo ip netns exec "$NS" setsid "$BIN" "$CONF" >"$LOG" 2>&1 </dev/null &
+  sudo ip netns exec "$NS" setsid "$BIN" "${1:-$CONF}" >"$LOG" 2>&1 </dev/null &
   DAEMON_PID=$!
   for _ in $(seq 1 50); do grep -q "listening for knocks" "$LOG" 2>/dev/null && return 0; sleep 0.1; done
   return 1
 }
+# A table left by a trigger that is no longer in the config (renamed or
+# removed) would keep dropping its port with nothing to open it: startup
+# removes it. Tables that aren't sourceknock's are left alone.
+sudo ip netns exec "$NS" nft add table inet sourceknock_stale
+sudo ip netns exec "$NS" nft add chain inet sourceknock_stale service '{ type filter hook input priority 0; policy accept; }'
+sudo ip netns exec "$NS" nft add rule inet sourceknock_stale service tcp dport $((PORT+3)) drop
+sudo ip netns exec "$NS" nft add table inet keepme
+
 start_daemon || { echo "FAIL daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); echo "RESULT: $pass passed, $fail failed"; exit 1; }
+
+echo "--- stale tables ---"
+if sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_stale; then check "stale sourceknock table removed" 1 0; else check "stale sourceknock table removed" 1 1; fi
+if sudo ip netns exec "$NS" nft list tables | grep -q keepme; then check "other tables untouched" 1 1; else check "other tables untouched" 1 0; fi
+grep -q "removed stale table inet sourceknock_stale" "$LOG" && check "stale table removal logged" 1 1 || check "stale table removal logged" 1 0
+sudo ip netns exec "$NS" nft delete table inet keepme
 
 if wait $PRE_HOLD; then check "pre-start connection survives daemon start" 1 1; else check "pre-start connection survives daemon start" 1 0; cat "$WORK/pre_hold.log"; fi
 
 echo "mode=$MODE port=$PORT seq=$SEQ duration=$DURATION"
 echo "--- probe BEFORE knock (expect closed) ---"
 if probe; then check "pre-knock closed" 0 1; else check "pre-knock closed" 0 0; fi
+
+# The port is only closed on the trigger's interface: the server reaching its
+# own address arrives on lo, which no trigger manages.
+echo "--- same port over another interface (lo, expect open) ---"
+if sudo ip netns exec "$NS" python3 "$DRIVER" probe "$SERVER" "$PORT" 1.0; then check "port not blocked on other interfaces" 1 1; else check "port not blocked on other interfaces" 1 0; fi
 
 # What a scanner sees on the hidden port before any knock. Connection attempts
 # and FIN/NULL scans must be silently dropped. A bare ACK is let through (so
@@ -205,6 +229,20 @@ if [ "$MODE" = "close_on_connect" ]; then
   if probe; then check "new connection refused while session open" 0 1; else check "new connection refused while session open" 0 0; fi
   if wait $HOLD; then check "session survives close_on_connect" 1 1; else check "session survives close_on_connect" 1 0; cat "$WORK/hold.log"; fi
 
+  # Traffic of a session that is already open must not close a port opened by
+  # a later knock: only a new connection's SYN does.
+  echo "--- knock while a session is open (expect its traffic not to close the port) ---"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
+  sleep 0.5
+  rm -f "$WORK/busy_up"
+  python3 "$DRIVER" hold "$SERVER" "$PORT" 4 "$WORK/busy_up" >"$WORK/busy.log" 2>&1 &
+  BUSY=$!
+  wait_file "$WORK/busy_up" || echo "busy session never connected"
+  "$KNOCK" -s "$CLIENT" -d 50 -p "$PORT" "$SERVER" "$SEQ"
+  sleep 1 # the open session keeps sending meanwhile
+  if probe; then check "open session's traffic doesn't close the port" 1 1; else check "open session's traffic doesn't close the port" 1 0; fi
+  if wait $BUSY; then check "busy session survives" 1 1; else check "busy session survives" 1 0; cat "$WORK/busy.log"; fi
+
   # fallback_ttl must be enforced by the kernel, not by the daemon noticing a
   # later packet: knock, then send NOTHING to the server until it has passed.
   echo "--- knock, stay silent for fallback_ttl=${FALLBACK}s (expect closed) ---"
@@ -231,8 +269,10 @@ if [ "$MODE" = "close_on_connect" ]; then
   KPIDS=()
   for i in $(seq 1 $MANY); do "$KNOCK" -s "10.20.0.$((99+i))" -d 50 -p "$PORT" "$SERVER" "$SEQ" & KPIDS+=($!); done
   wait "${KPIDS[@]}"
-  sleep 1
   allowed() { sudo ip netns exec "$NS" nft list set inet "sourceknock_$SERVICE" allowed_v4 | grep -oE '10\.20\.0\.1[0-9][0-9]' | sort -u | wc -l | tr -d ' '; }
+  # The daemon runs nft twice per knock, so 70 at once take a few seconds to
+  # work through: poll (inside fallback_ttl) rather than count once.
+  for _ in $(seq 1 40); do [ "$(allowed)" = "$MANY" ] && break; sleep 0.1; done
   n="$(allowed)"; if [ "$n" = "$MANY" ]; then check "all $MANY clients armed ($n)" 1 1; else check "all $MANY clients armed ($n)" 1 0; fi
   LAST=10.20.0.$((99+MANY))
   if python3 "$DRIVER" probe "$SERVER" "$PORT" 1.0 "$LAST"; then check "client #$MANY can connect" 1 1; else check "client #$MANY can connect" 1 0; fi
@@ -294,6 +334,11 @@ else
   check "server's own outgoing frames are not a knock" 1 1
 fi
 
+# The extra daemons below run one at a time, with the main one stopped: each
+# daemon removes sourceknock tables that aren't in its own config (one daemon
+# per host).
+sudo kill -TERM "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null
+
 # Loopback delivers every frame twice to AF_PACKET (once outgoing, once
 # incoming). A knock over lo must be seen exactly once.
 echo "--- knock over loopback (each frame counted once) ---"
@@ -348,15 +393,17 @@ else
 fi
 sudo ip netns exec "$NS" ip link del skgre0
 
-# knock_port: a second daemon on the same interface only counts frames sent
-# to destination port 4444. The main daemon (no knock_port) sees the same
-# frames, which shows what knock_port protects against.
+# knock_port: one daemon runs the main trigger plus a trigger that only counts
+# frames sent to destination port 4444. The main trigger (no knock_port) sees
+# the same frames, which shows what knock_port protects against. A third
+# trigger on lo shows one daemon reading knocks from two interfaces.
 echo "--- knock_port ---"
 KP_PORT=$((PORT+11))
-printf '[global]\ninterface = e2e-s\n[trigger:kpe2e]\nport = %s\nsequence = %s\nknock_port = 4444\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$KP_PORT" "$SEQ" > "$WORK/kp.conf"
-sudo ip netns exec "$NS" setsid "$BIN" "$WORK/kp.conf" >"$WORK/kp.log" 2>&1 </dev/null &
-KP_PID=$!
-for _ in $(seq 1 50); do grep -q "listening for knocks" "$WORK/kp.log" && break; sleep 0.1; done
+LO2_PORT=$((PORT+13))
+{ cat "$CONF"; printf '\n[trigger:kpe2e]\nport = %s\nsequence = %s\nknock_port = 4444\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$KP_PORT" "$SEQ"
+  printf '[trigger:lo2e2e]\ninterface = lo\nport = %s\nsequence = %s\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$LO2_PORT" "$SEQ"; } > "$WORK/kp.conf"
+start_daemon "$WORK/kp.conf" || { echo "FAIL combined daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); }
+grep -q "listening for knocks on 'e2e-s', 'lo'" "$LOG" && check "one daemon reads two interfaces" 1 1 || { check "one daemon reads two interfaces" 1 0; cat "$LOG"; }
 udp() { python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('$CLIENT',$1)); s.sendto(b'x',('$SERVER',$2))"; }
 in_set() { sudo ip netns exec "$NS" nft list set inet "sourceknock_$1" allowed_v4 2>/dev/null | grep -q "$CLIENT"; }
 flush_sets() { for t in "$SERVICE" kpe2e; do sudo ip netns exec "$NS" nft flush set inet "sourceknock_$t" allowed_v4; done; }
@@ -375,6 +422,11 @@ for p in "${KS[@]}"; do udp "$p" 5555; sleep 0.05; done
 sleep 0.5
 in_set kpe2e && check "knock_port: knock to another port ignored" 0 1 || check "knock_port: knock to another port ignored" 0 0
 in_set "$SERVICE" && check "without knock_port it opens" 1 1 || check "without knock_port it opens" 1 0
+lo2_has() { sudo ip netns exec "$NS" nft list set inet sourceknock_lo2e2e allowed_v4 2>/dev/null | grep -q "$1"; }
+lo2_has "$CLIENT" && check "a knock on e2e-s doesn't open the lo trigger" 0 1 || check "a knock on e2e-s doesn't open the lo trigger" 0 0
+sudo ip netns exec "$NS" "$KNOCK" -s 127.0.0.1 -d 50 -p 9 127.0.0.1 "$SEQ"
+sleep 0.5
+lo2_has 127.0.0.1 && check "same daemon: knock over lo opens the lo trigger" 1 1 || { check "same daemon: knock over lo opens the lo trigger" 1 0; cat "$LOG"; }
 
 # C: what replies to the server's outbound connections look like on the wire
 # (the remote's service port as source, the server's ephemeral port as dest).
@@ -382,7 +434,98 @@ flush_sets
 for p in "${KS[@]}"; do udp "$p" 45678; sleep 0.05; done
 sleep 0.5
 in_set kpe2e && check "knock_port: reply-shaped traffic ignored" 0 1 || check "knock_port: reply-shaped traffic ignored" 0 0
-sudo kill -TERM "$KP_PID" 2>/dev/null; sudo pkill -TERM -f "$WORK/kp.conf"; wait "$KP_PID" 2>/dev/null
+
+# An interface going down and back up must not stop the daemon: it keeps
+# running and reads knocks on that interface again once it's back.
+echo "--- capture interface goes down and comes back ---"
+sudo ip netns exec "$NS" ip link set e2e-s down; sleep 2
+if kill -0 "$DAEMON_PID" 2>/dev/null; then check "daemon survives its interface going down" 1 1; else check "daemon survives its interface going down" 1 0; tail -5 "$LOG"; fi
+sudo ip netns exec "$NS" ip link set e2e-s up
+sudo ip netns exec "$NS" ip addr add $SERVER/24 dev e2e-s 2>/dev/null
+for _ in $(seq 1 50); do grep -q "'e2e-s' is up" "$LOG" && break; sleep 0.1; done
+sleep 1
+flush_sets
+for p in "${KS[@]}"; do udp "$p" 4444; sleep 0.05; done
+sleep 0.5
+in_set kpe2e && check "knocks work again after the interface comes back" 1 1 || { check "knocks work again after the interface comes back" 1 0; tail -8 "$LOG"; }
+
+# An interface that doesn't exist yet at startup (a VPN not up yet) must not
+# stop the daemon: it starts, keeps that trigger's port closed, and reads
+# knocks there once the interface appears.
+echo "--- interface missing at startup ---"
+sudo kill -TERM "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null
+LATE_PORT=$((PORT+15))
+{ cat "$CONF"; printf '\n[trigger:latee2e]\ninterface = sklate0\nport = %s\nsequence = %s\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$LATE_PORT" "$SEQ"; } > "$WORK/late.conf"
+start_daemon "$WORK/late.conf" && check "starts with an interface missing" 1 1 || { check "starts with an interface missing" 1 0; tail -5 "$LOG"; }
+grep -q "interface 'sklate0' does not exist" "$LOG" && check "missing interface is logged" 1 1 || check "missing interface is logged" 1 0
+if sudo ip netns exec "$NS" nft list chain inet sourceknock_latee2e service 2>/dev/null | grep -q "dport $LATE_PORT drop"; then check "missing interface's port still closed" 1 1; else check "missing interface's port still closed" 1 0; fi
+sudo ip netns exec "$NS" nft flush set inet "sourceknock_$SERVICE" allowed_v4
+"$KNOCK" -s "$CLIENT" -d 50 -p 4444 "$SERVER" "$SEQ"; sleep 0.5
+in_set "$SERVICE" && check "other triggers work meanwhile" 1 1 || { check "other triggers work meanwhile" 1 0; tail -5 "$LOG"; }
+sudo ip netns exec "$NS" ip link add sklate0 type dummy
+sudo ip netns exec "$NS" ip link set sklate0 up
+for _ in $(seq 1 50); do grep -q "'sklate0' is up" "$LOG" && break; sleep 0.1; done
+grep -q "'sklate0' is up" "$LOG" && check "picked up once it appears" 1 1 || { check "picked up once it appears" 1 0; tail -5 "$LOG"; }
+sudo ip netns exec "$NS" ip link del sklate0
+
+# Time-based knock (secret_file, like a 2FA code): the right key opens, a
+# wrong key doesn't, and the same time step's knock works only once.
+echo "--- time-based knock (secret_file) ---"
+sudo kill -TERM "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null
+printf 'e2e-test-secret-%s\n' "$$" > "$WORK/good.key"
+printf 'e2e-wrong-secret-%s\n' "$$" > "$WORK/bad.key"
+TOTP_PORT=$((PORT+17))
+totp_conf() { # [extra trigger name]
+  cat "$CONF"
+  printf '\n[trigger:totpe2e]\nsecret_file = %s  # comment after a value\nport = %s\nknock_port = 4445\nwindow = 5\nmode = fixed_ttl\nduration = 60\nmax_allowed = 512\n' "$WORK/good.key" "$TOTP_PORT"
+  [ -n "${1:-}" ] && printf '[trigger:%s]\nport = %s\nsequence = 4100,4200,4300\n' "$1" "$((PORT+19))"
+}
+totp_conf > "$WORK/totp.conf"
+if sudo ip netns exec "$NS" "$BIN" -t "$WORK/totp.conf" >/dev/null 2>&1; then check "-t accepts the secret_file config" 1 1; else check "-t accepts the secret_file config" 1 0; fi
+start_daemon "$WORK/totp.conf" || { echo "FAIL totp daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); }
+totp_set() { sudo ip netns exec "$NS" nft list set inet sourceknock_totpe2e allowed_v4 2>/dev/null; }
+totp_set | grep -q "size 512" && check "max_allowed sets the set size" 1 1 || { check "max_allowed sets the set size" 1 0; totp_set; }
+# Stay inside one 30s step for the next three knocks.
+sec=$(( $(date +%s) % 30 )); [ "$sec" -ge 22 ] && sleep $((31 - sec))
+"$KNOCK" -s "$CLIENT" -d 50 -p 4445 -K "$WORK/bad.key" "$SERVER"; sleep 0.5
+totp_set | grep -q "$CLIENT" && check "wrong key doesn't open" 0 1 || check "wrong key doesn't open" 0 0
+STEP0=$(( $(date +%s) / 30 ))
+"$KNOCK" -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
+totp_set | grep -q "$CLIENT" && check "right key opens" 1 1 || { check "right key opens" 1 0; tail -5 "$LOG"; }
+sudo ip netns exec "$NS" nft flush set inet sourceknock_totpe2e allowed_v4
+"$KNOCK" -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
+totp_set | grep -q "$CLIENT" && check "same step's knock replayed: refused" 0 1 || check "same step's knock replayed: refused" 0 0
+grep -q "already used" "$LOG" && check "replay logged" 1 1 || check "replay logged" 1 0
+
+# SIGHUP reload: clients already let in stay in, new triggers appear, a bad
+# config is refused with the running one kept, removed triggers' tables go.
+echo "--- reload (SIGHUP) ---"
+sudo ip netns exec "$NS" nft add element inet sourceknock_totpe2e allowed_v4 "{ $CLIENT timeout 300s }"
+cp "$WORK/totp.conf" "$WORK/totp.conf.orig"
+totp_conf newe2e > "$WORK/totp.conf"
+sudo pkill -HUP -x sourceknock
+for _ in $(seq 1 50); do grep -q "reload: applied" "$LOG" && break; sleep 0.1; done
+grep -q "reload: applied (3 trigger(s))" "$LOG" && check "reload applies a new config" 1 1 || { check "reload applies a new config" 1 0; tail -8 "$LOG"; }
+sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_newe2e && check "reload adds the new trigger's table" 1 1 || check "reload adds the new trigger's table" 1 0
+totp_set | grep -q "$CLIENT" && check "reload keeps clients already let in" 1 1 || check "reload keeps clients already let in" 1 0
+printf '[trigger:broken]\nport = 22\n' > "$WORK/totp.conf"
+sudo pkill -HUP -x sourceknock
+for _ in $(seq 1 50); do grep -q "keeping the running config" "$LOG" && break; sleep 0.1; done
+grep -q "keeping the running config" "$LOG" && check "bad config reload refused" 1 1 || { check "bad config reload refused" 1 0; tail -5 "$LOG"; }
+kill -0 "$DAEMON_PID" 2>/dev/null && check "daemon still running after a bad reload" 1 1 || check "daemon still running after a bad reload" 1 0
+sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_newe2e && check "bad reload leaves the tables alone" 1 1 || check "bad reload leaves the tables alone" 1 0
+totp_set | grep -q "$CLIENT" && check "bad reload keeps clients" 1 1 || check "bad reload keeps clients" 1 0
+cp "$WORK/totp.conf.orig" "$WORK/totp.conf"
+n0=$(grep -c "reload: applied" "$LOG")
+sudo pkill -HUP -x sourceknock
+for _ in $(seq 1 50); do [ "$(grep -c "reload: applied" "$LOG")" -gt "$n0" ] && break; sleep 0.1; done
+sudo ip netns exec "$NS" nft list tables | grep -q sourceknock_newe2e && check "reload removes a dropped trigger's table" 0 1 || check "reload removes a dropped trigger's table" 0 0
+# the replay protection survives a reload
+sudo ip netns exec "$NS" nft flush set inet sourceknock_totpe2e allowed_v4
+if [ $(( $(date +%s) / 30 )) -eq "$STEP0" ]; then
+  "$KNOCK" -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
+  totp_set | grep -q "$CLIENT" && check "used step still refused after reload" 0 1 || check "used step still refused after reload" 0 0
+fi
 
 # Log timestamps are wall-clock time (not time since boot).
 echo "--- log timestamps ---"

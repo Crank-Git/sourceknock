@@ -13,8 +13,8 @@
  * untouched) ct state established,related accept (open sessions survive the
  * port closing) # one accept (per family) + one drop rule per service port: ip
  * saddr @allowed_v4 <proto> dport <port1> accept ip6 saddr @allowed_v6 <proto>
- * dport <port1> accept <proto> dport <port1> drop (port closed by default for
- * everyone else)
+ * dport <port1> accept iifname "<iface>" <proto> dport <port1> drop (port
+ * closed by default for everyone else on the trigger's interface)
  *       ... (repeat for port2, port3, ...) *
  *     }
  *   }
@@ -43,9 +43,12 @@ typedef struct
  * nft command fails it removes the table again and returns -1.
  * `table` is the full nft table name (e.g. "inet sourceknock_ssh"); callers
  * must give each trigger a distinct name so multiple triggers don't clobber
- * each other's rules. */
-int reward_init(reward_t *r, const char *table, const uint16_t *ports,
-                size_t n_ports, proto_t proto, double fallback_ttl);
+ * each other's rules. The drop rules match only packets arriving on `iface`.
+ * Each allowed set holds at most `max_allowed` addresses (re-running it with a
+ * new size resizes the sets and keeps their elements). */
+int reward_init(reward_t *r, const char *table, const char *iface,
+                const uint16_t *ports, size_t n_ports, proto_t proto,
+                double fallback_ttl, long max_allowed);
 
 /* Open the port for `ip`. `family` is AF_INET or AF_INET6 and `ip` points at
  * the matching address struct. `timeout` is the kernel-enforced lifetime of the
@@ -64,5 +67,11 @@ int reward_flush(reward_t *r);
  * startup fails after some triggers were already programmed, so the daemon
  * never exits leaving a service port closed with nothing to open it. */
 int reward_destroy(reward_t *r);
+
+/* Delete every "inet sourceknock_*" table not named in `keep` (full names, as
+ * in reward_t.table). A trigger that was renamed or removed from the config
+ * leaves its table behind, still dropping its ports with nothing left to open
+ * them. Assumes one daemon per host. Returns 0, or -1 if anything failed. */
+int reward_prune_stale(const char *const *keep, size_t n_keep);
 
 #endif /* SOURCEKNOCK_REWARD_H */

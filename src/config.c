@@ -210,6 +210,8 @@ int config_table_name(const char *service, char *out, size_t outlen)
 
 int config_weak_sequence(const trigger_t *tr, char *msg, size_t msglen)
 {
+    if (tr->secret_file[0])
+        return 0; /* derived sequences are chosen to be strong */
     if (tr->seq_len < 3)
     {
         snprintf(msg, msglen,
@@ -315,6 +317,7 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                 trigs[n].window = 5.0;
                 trigs[n].duration = 30.0;
                 trigs[n].fallback_ttl = 300.0; /* safety max open time */
+                trigs[n].max_allowed = 256;
                 n++;
                 cur = &trigs[n - 1];
             }
@@ -331,7 +334,17 @@ int config_parse_string(const char *text, char *err, size_t errlen)
             continue;
         *eq = '\0';
         char *key = trim(s);
-        char *val = trim(eq + 1);
+        char *val = eq + 1;
+        /* A '#' or ';' at the start of the value or after whitespace starts a
+         * comment (`port = 22  # ssh`); one inside a word (a path) doesn't. */
+        for (char *c = val; *c; c++)
+            if ((*c == '#' || *c == ';') &&
+                (c == val || isspace((unsigned char)c[-1])))
+            {
+                *c = '\0';
+                break;
+            }
+        val = trim(val);
 
         if (!section)
         {
@@ -445,6 +458,31 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                 }
                 cur->knock_port = (uint16_t)v;
             }
+            else if (strcmp(key, "secret_file") == 0)
+            {
+                if (strlen(val) >= sizeof(cur->secret_file))
+                {
+                    snprintf(err, errlen, "secret_file path too long");
+                    goto fail;
+                }
+                strcpy(cur->secret_file, val);
+            }
+            else if (strcmp(key, "max_allowed") == 0)
+            {
+                char *e;
+                long v = strtol(val, &e, 10);
+                if (*e || e == val || v < 1 || v > 1048576)
+                {
+                    snprintf(err, errlen,
+                             "invalid max_allowed '%s' (1..1048576)", val);
+                    goto fail;
+                }
+                cur->max_allowed = v;
+            }
+            else if (strcmp(key, "interface") == 0)
+            {
+                strncpy(cur->interface, val, sizeof(cur->interface) - 1);
+            }
             else if (strcmp(key, "fallback_ttl") == 0)
             {
                 char *e;
@@ -473,9 +511,24 @@ int config_parse_string(const char *text, char *err, size_t errlen)
      * each trigger's nft table name must fit and be unique. */
     for (size_t i = 0; i < n; i++)
     {
-        if (!trigs[i].sequence || trigs[i].seq_len == 0)
+        int has_seq = trigs[i].sequence && trigs[i].seq_len > 0;
+        int has_secret = trigs[i].secret_file[0] != '\0';
+        if (has_seq == has_secret)
         {
-            snprintf(err, errlen, "trigger '%s': sequence is required",
+            snprintf(err, errlen,
+                     has_seq ? "trigger '%s': set sequence or secret_file, not "
+                               "both"
+                             : "trigger '%s': sequence (or secret_file) is "
+                               "required",
+                     trigs[i].service);
+            goto fail;
+        }
+        if (has_secret && trigs[i].admin_seq_len > 0)
+        {
+            snprintf(err, errlen,
+                     "trigger '%s': admin_sequence can't be used with "
+                     "secret_file (the revoke knock comes from the secret: "
+                     "sourceknock-knock -r)",
                      trigs[i].service);
             goto fail;
         }
@@ -490,6 +543,19 @@ int config_parse_string(const char *text, char *err, size_t errlen)
         if (trigs[i].service[0] == '\0')
         {
             snprintf(err, errlen, "trigger %zu: service name is empty", i + 1);
+            goto fail;
+        }
+        if (trigs[i].interface[0] == '\0')
+            strcpy(trigs[i].interface, g_cfg.interface);
+        /* The name goes into nft rules, so allow only what an interface name
+         * plausibly holds (and fits IFNAMSIZ). */
+        size_t il = strspn(trigs[i].interface, "abcdefghijklmnopqrstuvwxyz"
+                                               "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                               "0123456789_.-@");
+        if (il == 0 || il > 15 || trigs[i].interface[il] != '\0')
+        {
+            snprintf(err, errlen, "trigger '%s': invalid interface name '%s'",
+                     trigs[i].service, trigs[i].interface);
             goto fail;
         }
         char ti[CONFIG_TABLE_NAME_MAX];
@@ -515,6 +581,26 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                          trigs[j].service, trigs[i].service, ti);
                 goto fail;
             }
+            /* Each trigger's table drops its ports on its interface for
+             * everyone not in its own allowed set, and a drop in any nft table
+             * is final, so two triggers on one port and interface would keep
+             * it closed to every client. */
+            if (trigs[i].protocol != trigs[j].protocol ||
+                strcmp(trigs[i].interface, trigs[j].interface) != 0)
+                continue;
+            for (size_t a = 0; a < trigs[i].n_ports; a++)
+                for (size_t b = 0; b < trigs[j].n_ports; b++)
+                    if (trigs[i].ports[a] == trigs[j].ports[b])
+                    {
+                        snprintf(err, errlen,
+                                 "triggers '%s' and '%s' both manage %s port "
+                                 "%d on %s; a port can belong to only one "
+                                 "trigger per interface",
+                                 trigs[j].service, trigs[i].service,
+                                 trigs[i].protocol == PROTO_UDP ? "udp" : "tcp",
+                                 trigs[i].ports[a], trigs[i].interface);
+                        goto fail;
+                    }
         }
     }
 

@@ -220,7 +220,6 @@ kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip, uint16_t sport,
         }
         i = add_slot(ctx, family, ip, now);
         ctx->slots[i].index = 1;
-        ctx->slots[i].state = KNOCK_KNOCKING;
         return KNOCK_PROGRESS;
     }
 
@@ -245,7 +244,6 @@ kn_result_t kn_feed(kn_ctx_t *ctx, int family, const void *ip, uint16_t sport,
     c->index++;
     if (c->index >= ctx->seq.len)
     {
-        c->state = KNOCK_COMPLETE;
         if (ctx->on_complete)
             ctx->on_complete(ctx, family, ip, ctx->complete_arg);
         /* Done: drop the entry so the next knock starts fresh. */

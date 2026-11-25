@@ -108,6 +108,7 @@ static int parse_ipv4(const unsigned char *buf, size_t len, size_t ip_off,
         out->proto = PROTO_TCP;
         out->sport = be16(iph, l4len, 0);
         out->dport = be16(iph, l4len, 2);
+        out->tcp_flags = l4len >= 14 ? iph[13] : 0;
         return 1;
     }
     if (l4proto == IPPROTO_UDP && l4len >= 8)
@@ -153,6 +154,7 @@ static int parse_ipv6(const unsigned char *buf, size_t len, size_t ip_off,
         out->proto = PROTO_TCP;
         out->sport = be16(l4, l4len, 0);
         out->dport = be16(l4, l4len, 2);
+        out->tcp_flags = l4len >= 14 ? l4[13] : 0;
         return 1;
     }
     out->family = AF_INET6;

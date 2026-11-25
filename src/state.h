@@ -21,13 +21,6 @@ typedef struct
     size_t len;
 } knock_sequence_t;
 
-typedef enum
-{
-    KNOCK_IDLE = 0, /* no progress on this client */
-    KNOCK_KNOCKING, /* partway through the sequence */
-    KNOCK_COMPLETE  /* sequence finished (trigger fired) */
-} knock_state_t;
-
 /* What happened when a packet was fed into the machine. */
 typedef enum
 {
@@ -55,7 +48,6 @@ typedef struct
         struct in6_addr v6;
     } addr;
     size_t index;
-    knock_state_t state;
     double start_time;
     /* internal: hash chain and oldest-first age list (slot indices, -1 =
      * none) */

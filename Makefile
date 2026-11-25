@@ -35,14 +35,14 @@ ifeq ($(OS),Darwin)
   endif
 endif
 
-SRC     := src/state.c src/packet.c src/config.c src/close.c
+SRC     := src/state.c src/packet.c src/config.c src/close.c src/totp.c src/rolling.c
 CORE_OBJ:= $(SRC:.c=.o)
 
 # Daemon links Linux-only capture/reward layers.
 DAEMON_SRC := src/sourceknock.c src/capture.c src/reward.c $(SRC)
 DAEMON_OBJ := $(DAEMON_SRC:.c=.o)
 
-TESTS := state_test packet_test config_test close_test
+TESTS := state_test packet_test config_test close_test totp_test rolling_test
 
 # The knock client is plain POSIX, so it builds anywhere.
 CLIENT := sourceknock-knock
@@ -73,7 +73,7 @@ FUZZ_CC ?= clang
 all: test
 
 client: $(CLIENT)
-$(CLIENT): src/knock.o
+$(CLIENT): src/knock.o src/totp.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # ---- code quality (clang-format + clang-tidy) ----
@@ -118,7 +118,7 @@ test-asan:
 	$(MAKE) clean
 
 %_test.o: tests/%_test.c
-	$(CC) $(CFLAGS) -Isrc -Itests -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Isrc -Itests -c $< -o $@
 
 # each test links against the pure core
 state_test: tests/state_test.o src/state.o
@@ -128,6 +128,10 @@ packet_test: tests/packet_test.o src/packet.o
 config_test: tests/config_test.o src/config.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 close_test: tests/close_test.o src/close.o
+	$(CC) $^ -o $@ $(LDFLAGS)
+totp_test: tests/totp_test.o src/totp.o
+	$(CC) $^ -o $@ $(LDFLAGS)
+rolling_test: tests/rolling_test.o src/rolling.o src/state.o src/totp.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 
 # ---- fuzzing (Linux only) ----
@@ -158,7 +162,12 @@ sourceknock: $(DAEMON_OBJ)
 
 # Generic object rule (keeps -Isrc so headers in src/ resolve).
 %.o: %.c
-	$(CC) $(CFLAGS) -Isrc -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Isrc -c $< -o $@
+
+# Rebuild objects when a header they include changes (struct layouts are
+# shared between objects, so a stale one links but misbehaves).
+DEPFLAGS := -MMD -MP
+-include $(wildcard src/*.d tests/*.d)
 
 # ---- install (Linux only: ships the systemd units) ----
 # Installs the daemon binary and the systemd units, then reloads systemd.
@@ -197,4 +206,4 @@ uninstall:
 	rm -f $(DESTDIR)$(MANDIR)/man1/sourceknock.1 $(DESTDIR)$(MANDIR)/man1/sourceknock-knock.1
 
 clean:
-	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock $(CLIENT) src/knock.o tests/*.o $(FUZZ_BIN) $(FUZZ_DIR)/*.o
+	rm -f $(CORE_OBJ) $(DAEMON_OBJ) $(TESTS) sourceknock $(CLIENT) src/knock.o tests/*.o $(FUZZ_BIN) $(FUZZ_DIR)/*.o src/*.d tests/*.d

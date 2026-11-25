@@ -106,8 +106,9 @@ static const char *proto_str(proto_t proto)
     return proto == PROTO_UDP ? "udp" : "tcp";
 }
 
-int reward_init(reward_t *r, const char *table, const uint16_t *ports,
-                size_t n_ports, proto_t proto, double fallback_ttl)
+int reward_init(reward_t *r, const char *table, const char *iface,
+                const uint16_t *ports, size_t n_ports, proto_t proto,
+                double fallback_ttl, long max_allowed)
 {
     memset(r, 0, sizeof(*r));
     strncpy(r->table, table, sizeof(r->table) - 1);
@@ -129,12 +130,12 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
 
     /* Per-family allowed sets (per-element timeout). */
     snprintf(cmd, sizeof(cmd),
-             "add set %s %s { type ipv4_addr; flags timeout; size 256; }",
-             r->table, r->set_v4);
+             "add set %s %s { type ipv4_addr; flags timeout; size %ld; }",
+             r->table, r->set_v4, max_allowed);
     failed |= run_nft_str(cmd);
     snprintf(cmd, sizeof(cmd),
-             "add set %s %s { type ipv6_addr; flags timeout; size 256; }",
-             r->table, r->set_v6);
+             "add set %s %s { type ipv6_addr; flags timeout; size %ld; }",
+             r->table, r->set_v6, max_allowed);
     failed |= run_nft_str(cmd);
 
     /* Base chain, policy accept so other traffic is unaffected. */
@@ -189,8 +190,11 @@ int reward_init(reward_t *r, const char *table, const uint16_t *ports,
             failed |= run_nft_str(cmd);
         }
 
-        snprintf(cmd, sizeof(cmd), "add rule %s %s %s dport %d drop", r->table,
-                 r->chain, proto_str(proto), port);
+        /* Only on the trigger's own interface: other interfaces (a VPN,
+         * loopback) are left alone, so they never lock anyone out. */
+        snprintf(cmd, sizeof(cmd),
+                 "add rule %s %s iifname \"%s\" %s dport %d drop", r->table,
+                 r->chain, iface, proto_str(proto), port);
         failed |= run_nft_str(cmd);
     }
 
@@ -279,6 +283,48 @@ int reward_destroy(reward_t *r)
     snprintf(cmd, sizeof(cmd), "delete table %s", r->table);
     r->initialized = 0;
     return run_nft_str(cmd);
+}
+
+int reward_prune_stale(const char *const *keep, size_t n_keep)
+{
+    /* Same pinned PATH as run_nft(). */
+    FILE *f =
+        popen("PATH=/usr/sbin:/sbin:/usr/bin:/bin nft list tables inet", "r");
+    if (!f)
+    {
+        fprintf(stderr, "reward: cannot list nft tables: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    int rc = 0;
+    char line[320];
+    char name[256];
+    while (fgets(line, sizeof(line), f))
+    {
+        if (sscanf(line, "table inet %255s", name) != 1 ||
+            strncmp(name, "sourceknock_", strlen("sourceknock_")) != 0)
+            continue;
+        char full[300];
+        snprintf(full, sizeof(full), "inet %s", name);
+        int kept = 0;
+        for (size_t i = 0; i < n_keep && !kept; i++)
+            kept = strcmp(full, keep[i]) == 0;
+        if (kept)
+            continue;
+        char cmd[320];
+        snprintf(cmd, sizeof(cmd), "delete table %s", full);
+        if (run_nft_str(cmd) == 0)
+            fprintf(stderr, "reward: removed stale table %s (not in config)\n",
+                    full);
+        else
+            rc = -1;
+    }
+    if (pclose(f) != 0)
+    {
+        fprintf(stderr, "reward: 'nft list tables' failed\n");
+        rc = -1;
+    }
+    return rc;
 }
 
 int reward_flush(reward_t *r)

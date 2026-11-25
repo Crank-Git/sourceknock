@@ -290,6 +290,73 @@ static void test_table_name_collision(void)
     CHECK_EQ_INT(g_cfg.n_triggers, 2);
 }
 
+/* Two triggers on one port: each table's drop rule blocks the other's clients,
+ * so the port could never open. Same port over another protocol is fine. */
+static void test_shared_port(void)
+{
+    char err[256];
+    const char *c = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "[trigger:b]\nport = 80, 22\nsequence = 4,5,6\n";
+    CHECK(parse(c, err, sizeof(err)) == -1);
+    CHECK(strstr(err, "tcp port 22") != NULL);
+    CHECK_EQ_INT(g_cfg.n_triggers, 0);
+
+    const char *r = "[trigger:a]\nport = 8000-8002\nsequence = 1,2,3\n"
+                    "[trigger:b]\nport = 8002\nsequence = 4,5,6\n";
+    CHECK(parse(r, err, sizeof(err)) == -1);
+    CHECK(strstr(err, "8002") != NULL);
+
+    const char *ok =
+        "[trigger:a]\nport = 53\nprotocol = tcp\nsequence = 1,2,3\n"
+        "[trigger:b]\nport = 53\nprotocol = udp\nsequence = 4,5,6\n";
+    CHECK_EQ_INT(parse(ok, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.n_triggers, 2);
+
+    /* Each trigger only closes its port on its own interface. */
+    const char *ifs = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                      "interface = eth0\n"
+                      "[trigger:b]\nport = 22\nsequence = 4,5,6\n"
+                      "interface = wg0\n";
+    CHECK_EQ_INT(parse(ifs, err, sizeof(err)), 0);
+}
+
+/* A trigger's interface defaults to [global] interface, wherever [global]
+ * appears in the file; `interface =` in a trigger overrides it. */
+static void test_trigger_interface(void)
+{
+    char err[256];
+    const char *c = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "[trigger:b]\nport = 80\nsequence = 4,5,6\n"
+                    "interface = wg0\n"
+                    "[global]\ninterface = eth0\n";
+    CHECK_EQ_INT(parse(c, err, sizeof(err)), 0);
+    CHECK_EQ_STR(g_cfg.triggers[0].interface, "eth0");
+    CHECK_EQ_STR(g_cfg.triggers[1].interface, "wg0");
+
+    CHECK_EQ_INT(
+        parse("[trigger:a]\nport = 22\nsequence = 1,2,3\n", err, sizeof(err)),
+        0);
+    CHECK_EQ_STR(g_cfg.triggers[0].interface, "lo"); /* the old default */
+
+    const char *bad[] = {"eth 0", "a\"b", "x;y", "0123456789abcdef", "a/b"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+    {
+        char t[160];
+        snprintf(t, sizeof(t),
+                 "[trigger:a]\nport = 22\nsequence = 1,2,3\ninterface = %s\n",
+                 bad[i]);
+        CHECK(parse(t, err, sizeof(err)) == -1);
+        CHECK(strstr(err, "interface") != NULL);
+    }
+    CHECK(parse("[global]\ninterface =\n[trigger:a]\nport = 22\n"
+                "sequence = 1,2,3\n",
+                err, sizeof(err)) == -1);
+    CHECK_EQ_INT(parse("[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                       "interface = br-1a2b.100@x\n",
+                       err, sizeof(err)),
+                 0);
+}
+
 /* Names that don't fit the 64-byte table name used to be truncated, so two
  * long names with a common prefix collided silently. */
 static void test_service_name_too_long(void)
@@ -477,13 +544,94 @@ static void test_readme_example_parses(void)
     free(md);
 }
 
+/* `#` / `;` start a comment at the start of a value or after whitespace, but
+ * not inside a word. */
+static void test_inline_comments(void)
+{
+    char err[256];
+    CHECK_EQ_INT(parse("[global]\ninterface = wg0 # vpn\n"
+                       "[trigger:a]  ; the ssh trigger\n"
+                       "port = 22, 2222   # ssh\nsequence = 1,2,3 ;knock\n"
+                       "mode = permanent#not-a-comment-start\n",
+                       err, sizeof(err)),
+                 -1); /* "permanent#..." is one word: an invalid mode */
+    CHECK(strstr(err, "permanent#not-a-comment-start") != NULL);
+    CHECK_EQ_INT(parse("[global]\ninterface = wg0 # vpn\n"
+                       "[trigger:a]\n"
+                       "port = 22, 2222   # ssh\nsequence = 1,2,3 ;knock\n"
+                       "window = 5\t# seconds\nservice = #\n",
+                       err, sizeof(err)),
+                 -1); /* service = (empty after the comment) */
+    CHECK_EQ_INT(parse("[global]\ninterface = wg0 # vpn\n"
+                       "[trigger:a]\n"
+                       "port = 22, 2222   # ssh\nsequence = 1,2,3 ;knock\n"
+                       "window = 5\t# seconds\n",
+                       err, sizeof(err)),
+                 0);
+    CHECK_EQ_STR(g_cfg.interface, "wg0");
+    CHECK_EQ_INT(g_cfg.triggers[0].n_ports, 2);
+    CHECK_EQ_INT(g_cfg.triggers[0].ports[1], 2222);
+    CHECK_EQ_INT(g_cfg.triggers[0].seq_len, 3);
+    CHECK_EQ_INT(g_cfg.triggers[0].window, 5);
+}
+
+static void test_max_allowed(void)
+{
+    char err[256];
+    CHECK_EQ_INT(
+        parse("[trigger:a]\nport = 22\nsequence = 1,2,3\n", err, sizeof(err)),
+        0);
+    CHECK_EQ_INT(g_cfg.triggers[0].max_allowed, 256); /* the old fixed size */
+    CHECK_EQ_INT(parse("[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                       "max_allowed = 4096\n",
+                       err, sizeof(err)),
+                 0);
+    CHECK_EQ_INT(g_cfg.triggers[0].max_allowed, 4096);
+    const char *bad[] = {"0", "-1", "1048577", "x", "", "12k"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+    {
+        char c[128];
+        snprintf(c, sizeof(c),
+                 "[trigger:a]\nport = 22\nsequence = 1,2,3\nmax_allowed = %s\n",
+                 bad[i]);
+        CHECK(parse(c, err, sizeof(err)) == -1);
+        CHECK(strstr(err, "max_allowed") != NULL);
+    }
+}
+
+/* secret_file replaces sequence: exactly one of them, and no admin_sequence
+ * (the revoke knock is derived from the secret too). */
+static void test_secret_file(void)
+{
+    char err[256];
+    CHECK_EQ_INT(parse("[trigger:a]\nport = 22\nsecret_file = /etc/sk/a.key\n",
+                       err, sizeof(err)),
+                 0);
+    CHECK_EQ_STR(g_cfg.triggers[0].secret_file, "/etc/sk/a.key");
+    CHECK_EQ_INT(g_cfg.triggers[0].seq_len, 0);
+    char msg[160];
+    CHECK_EQ_INT(config_weak_sequence(&g_cfg.triggers[0], msg, sizeof(msg)), 0);
+
+    CHECK(parse("[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                "secret_file = /etc/sk/a.key\n",
+                err, sizeof(err)) == -1);
+    CHECK(strstr(err, "not both") != NULL);
+    CHECK(parse("[trigger:a]\nport = 22\n", err, sizeof(err)) == -1);
+    CHECK(strstr(err, "secret_file") != NULL);
+    CHECK(parse("[trigger:a]\nport = 22\nsecret_file = /k\n"
+                "admin_sequence = 4,5,6\n",
+                err, sizeof(err)) == -1);
+    CHECK(strstr(err, "admin_sequence") != NULL);
+}
+
 /* Every shipped example must parse. */
 static void test_examples_parse(void)
 {
     const char *files[] = {
         "examples/sourceknock.conf", "examples/ssh.conf",
         "examples/web.conf",         "examples/udp/wireguard.conf",
-        "tests/e2e_fixed.conf",      "tests/e2e_close.conf",
+        "examples/ssh-secret.conf",  "tests/e2e_fixed.conf",
+        "tests/e2e_close.conf",
     };
     char err[256];
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
@@ -545,6 +693,8 @@ int main(void)
     TEST_RUN(test_key_before_section);
     TEST_RUN(test_missing_port);
     TEST_RUN(test_table_name_collision);
+    TEST_RUN(test_shared_port);
+    TEST_RUN(test_trigger_interface);
     TEST_RUN(test_service_name_too_long);
     TEST_RUN(test_empty_service_name);
     TEST_RUN(test_sequence_port_zero);
@@ -553,6 +703,9 @@ int main(void)
     TEST_RUN(test_config_table_name);
     TEST_RUN(test_weak_sequence);
     TEST_RUN(test_readme_example_parses);
+    TEST_RUN(test_inline_comments);
+    TEST_RUN(test_max_allowed);
+    TEST_RUN(test_secret_file);
     TEST_RUN(test_examples_parse);
     TEST_RUN(test_knock_port);
     config_free();

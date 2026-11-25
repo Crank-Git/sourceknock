@@ -8,11 +8,16 @@ the wire: one datagram per sequence port, from exactly that SOURCE port, in
 order, to the requested destination port; IPv4 and IPv6; plus argument and
 bind-error handling. Works on Linux and macOS without root.
 """
+import hashlib
+import hmac
 import os
 import platform
 import socket
+import struct
 import subprocess
 import sys
+import tempfile
+import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./sourceknock-knock")
 passed = failed = 0
@@ -31,16 +36,18 @@ def run(*args):
     return subprocess.run([BIN, *args], capture_output=True, text=True, timeout=20)
 
 
-def receive(family, addr, seq, extra=()):
-    """Run the client at a fresh receiver; return [(sport, payload), ...]."""
+def receive(family, addr, seq, extra=(), count=None):
+    """Run the client at a fresh receiver; return [(sport, payload), ...].
+    With `seq` None the client derives the sequence itself (-K in `extra`)."""
     r = socket.socket(family, socket.SOCK_DGRAM)
     r.bind((addr, 0))
     r.settimeout(2.0)
     port = r.getsockname()[1]
-    p = run("-p", str(port), "-d", "20", *extra, addr, ",".join(map(str, seq)))
+    tail = [addr] if seq is None else [addr, ",".join(map(str, seq))]
+    p = run("-p", str(port), "-d", "20", *extra, *tail)
     got = []
     try:
-        for _ in seq:
+        for _ in range(count if seq is None else len(seq)):
             data, peer = r.recvfrom(64)
             got.append((peer[1], data))
     except socket.timeout:
@@ -94,6 +101,40 @@ def test_bad_arguments():
     check("unresolvable host -> exit 1", p.returncode == 1, p.stderr)
 
 
+def totp_ports(key, label, step):
+    """The spec in src/totp.h, computed independently of the C code."""
+    mac = hmac.new(key, f"sourceknock-v1:{label}:".encode() + struct.pack(">q", step),
+                   hashlib.sha256).digest()
+    return [1024 + int.from_bytes(mac[2 * i:2 * i + 2], "big") % 31744 for i in range(4)]
+
+
+def test_keyfile():
+    """-K derives the time-based sequence (-r the revoke one) from a secret."""
+    d = tempfile.mkdtemp()
+    key = b"client-test-secret-0123456789"
+    path = os.path.join(d, "k.key")
+    with open(path, "wb") as f:
+        f.write(key + b"\n")
+    for label, extra in (("knock", ["-K", path]), ("revoke", ["-K", path, "-r"])):
+        step = int(time.time()) // 30
+        p, got = receive(socket.AF_INET, "127.0.0.1", None, extra, count=4)
+        sports = [g[0] for g in got]
+        want = [totp_ports(key, label, s) for s in (step, step + 1)]
+        check(f"-K {label} exit 0", p.returncode == 0, p.stderr)
+        check(f"-K {label} sends the derived ports", sports in want, f"{sports} vs {want}")
+    for args in (["-r", "127.0.0.1", "1,2,3"], ["-K", path, "127.0.0.1", "1,2,3"]):
+        p = run(*args)
+        check(f"bad args {args} -> exit 2", p.returncode == 2, f"rc={p.returncode}")
+    with open(path, "wb") as f:
+        f.write(b"short\n")
+    p = run("-K", path, "127.0.0.1")
+    check("short secret -> exit 1", p.returncode == 1 and "at least" in p.stderr, p.stderr)
+    os.remove(path)
+    p = run("-K", path, "127.0.0.1")
+    check("missing secret file -> exit 1", p.returncode == 1, p.stderr)
+    os.rmdir(d)
+
+
 def test_source_port_in_use():
     holder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     holder.bind(("127.0.0.1", 47404))
@@ -120,7 +161,7 @@ def test_privileged_port_needs_root():
 if __name__ == "__main__":
     print("== knock client tests ==")
     for t in (test_ipv4_order_and_source_ports, test_ipv4_with_source_address,
-              test_ipv6, test_bad_arguments, test_source_port_in_use,
+              test_ipv6, test_bad_arguments, test_keyfile, test_source_port_in_use,
               test_privileged_port_needs_root):
         print(f"[run] {t.__name__}")
         t()

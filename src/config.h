@@ -30,10 +30,15 @@ typedef struct
     size_t admin_seq_len;
     double window; /* whole sequence must finish within this */
     trigger_mode_t mode;
-    double duration;     /* seconds, for MODE_FIXED_TTL */
-    double fallback_ttl; /* safety max open time (close_on_connect) */
-    uint16_t knock_port; /* optional: only frames to this dest port count
-                            toward the knock (0 = any destination) */
+    double duration;       /* seconds, for MODE_FIXED_TTL */
+    double fallback_ttl;   /* safety max open time (close_on_connect) */
+    uint16_t knock_port;   /* optional: only frames to this dest port count
+                              toward the knock (0 = any destination) */
+    char interface[64];    /* where knocks are read and the ports are closed;
+                              defaults to [global] interface */
+    long max_allowed;      /* most client IPs allowed at once, per family */
+    char secret_file[256]; /* time-based knock (totp.h) instead of `sequence`;
+                              empty = use the fixed sequence */
 } trigger_t;
 
 typedef struct

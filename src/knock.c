@@ -2,11 +2,15 @@
  * sourceknock-knock - send a source-port knock.
  *
  *   sourceknock-knock [-p PORT] [-d MS] [-s ADDR] [-4|-6] HOST SEQUENCE
+ *   sourceknock-knock -K KEYFILE [-r] [options] HOST
  *
  * Sends one UDP datagram per port in SEQUENCE (e.g. 7000,8000,9000), in
  * order, each bound to that port as its SOURCE port, to HOST:PORT. The
  * sourceknock daemon reads the knock from the source ports; the destination
  * port only matters if the trigger sets `knock_port` (pass it with -p).
+ *
+ * With -K the sequence is derived from the trigger's secret_file and the
+ * current time (totp.h), like a 2FA code; -r sends the revoke knock instead.
  *
  * Portable POSIX (Linux, macOS, BSD); no dependencies.
  */
@@ -22,6 +26,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "totp.h"
+
 #define MAX_SEQ 64
 
 static void usage(FILE *f)
@@ -29,10 +35,14 @@ static void usage(FILE *f)
     fprintf(f,
             "usage: sourceknock-knock [-p PORT] [-d MS] [-s ADDR] [-4|-6] "
             "HOST SEQUENCE\n"
+            "       sourceknock-knock -K KEYFILE [-r] [options] HOST\n"
             "\n"
             "Send one UDP datagram per port in SEQUENCE (comma-separated, in\n"
             "order), each from that SOURCE port, to HOST.\n"
             "\n"
+            "  -K FILE  derive the sequence from this secret and the current\n"
+            "           time (for a trigger with secret_file); no SEQUENCE\n"
+            "  -r       with -K: send the revoke knock (removes your address)\n"
             "  -p PORT  destination port (default 9; use the trigger's\n"
             "           knock_port if it sets one)\n"
             "  -d MS    delay between knocks in milliseconds (default 50)\n"
@@ -123,12 +133,19 @@ static int resolve(const char *host, int family, int passive,
 int main(int argc, char **argv)
 {
     int dport = 9, delay_ms = 50, family = AF_UNSPEC;
-    const char *src = NULL;
+    const char *src = NULL, *keyfile = NULL;
+    int revoke = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "p:d:s:46h")) != -1)
+    while ((opt = getopt(argc, argv, "p:d:s:K:r46h")) != -1)
     {
         switch (opt)
         {
+        case 'K':
+            keyfile = optarg;
+            break;
+        case 'r':
+            revoke = 1;
+            break;
         case 'p':
             if ((dport = parse_port(optarg, "port")) < 0)
                 return 2;
@@ -163,15 +180,33 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if (argc - optind != 2)
+    if (argc - optind != (keyfile ? 1 : 2) || (revoke && !keyfile))
     {
         usage(stderr);
         return 2;
     }
     const char *host = argv[optind];
     unsigned short seq[MAX_SEQ];
-    int n = parse_seq(argv[optind + 1], seq);
-    if (n < 0)
+    int n;
+    if (keyfile)
+    {
+        unsigned char key[TOTP_KEY_MAX];
+        size_t keylen;
+        char err[320];
+        if (totp_load_key(keyfile, key, &keylen, err, sizeof(err)) != 0)
+        {
+            fprintf(stderr, "sourceknock-knock: %s\n", err);
+            return 1;
+        }
+        uint16_t ports[TOTP_SEQ_LEN];
+        totp_sequence(key, keylen,
+                      revoke ? TOTP_LABEL_REVOKE : TOTP_LABEL_KNOCK,
+                      totp_step((long)time(NULL)), ports);
+        memset(key, 0, sizeof(key));
+        for (n = 0; n < TOTP_SEQ_LEN; n++)
+            seq[n] = ports[n];
+    }
+    else if ((n = parse_seq(argv[optind + 1], seq)) < 0)
         return 2;
 
     struct sockaddr_storage dst, local;
