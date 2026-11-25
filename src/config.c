@@ -171,6 +171,22 @@ static trigger_mode_t parse_mode(const char *s, char *err, size_t errlen)
     return (trigger_mode_t)-1;
 }
 
+static int parse_close_on(const char *s, close_on_t *out, char *err,
+                          size_t errlen)
+{
+    if (strcmp(s, "interface") == 0)
+        *out = CLOSE_ON_INTERFACE;
+    else if (strcmp(s, "all") == 0)
+        *out = CLOSE_ON_ALL;
+    else
+    {
+        snprintf(err, errlen,
+                 "close_on must be 'interface' or 'all' (got '%s')", s);
+        return -1;
+    }
+    return 0;
+}
+
 static void free_triggers(trigger_t *trigs, size_t n)
 {
     for (size_t i = 0; i < n; i++)
@@ -232,6 +248,37 @@ int config_weak_sequence(const trigger_t *tr, char *msg, size_t msglen)
         }
     }
     return 0;
+}
+
+int config_open_interfaces_warning(const trigger_t *tr,
+                                   const char *const *ifaces, size_t n,
+                                   char *msg, size_t msglen)
+{
+    if (tr->close_on != CLOSE_ON_INTERFACE)
+        return 0;
+    const char *tail = "; set close_on = all to block them";
+    char list[256] = "";
+    size_t used = 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        if (strcmp(ifaces[i], "lo") == 0 ||
+            strcmp(ifaces[i], tr->interface) == 0)
+            continue;
+        /* A long list is cut, never the advice after it. */
+        int w = snprintf(list + used, sizeof(list) - used, "%s%s",
+                         used ? ", " : "", ifaces[i]);
+        if (w < 0 || (size_t)w >= sizeof(list) - used)
+        {
+            list[used] = '\0';
+            break;
+        }
+        used += (size_t)w;
+    }
+    if (used == 0)
+        return 0;
+    snprintf(msg, msglen, "close_on = interface leaves its ports open on %s%s",
+             list, tail);
+    return 1;
 }
 
 int config_parse_string(const char *text, char *err, size_t errlen)
@@ -318,6 +365,7 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                 trigs[n].duration = 30.0;
                 trigs[n].fallback_ttl = 300.0; /* safety max open time */
                 trigs[n].max_allowed = 256;
+                trigs[n].close_on = (close_on_t)-1; /* unset: use [global] */
                 n++;
                 cur = &trigs[n - 1];
             }
@@ -356,6 +404,11 @@ int config_parse_string(const char *text, char *err, size_t errlen)
             if (strcmp(key, "interface") == 0)
             {
                 strncpy(g_cfg.interface, val, sizeof(g_cfg.interface) - 1);
+            }
+            else if (strcmp(key, "close_on") == 0)
+            {
+                if (parse_close_on(val, &g_cfg.close_on, err, errlen) != 0)
+                    goto fail;
             }
             else
             {
@@ -479,6 +532,11 @@ int config_parse_string(const char *text, char *err, size_t errlen)
                 }
                 cur->max_allowed = v;
             }
+            else if (strcmp(key, "close_on") == 0)
+            {
+                if (parse_close_on(val, &cur->close_on, err, errlen) != 0)
+                    goto fail;
+            }
             else if (strcmp(key, "interface") == 0)
             {
                 strncpy(cur->interface, val, sizeof(cur->interface) - 1);
@@ -547,6 +605,8 @@ int config_parse_string(const char *text, char *err, size_t errlen)
         }
         if (trigs[i].interface[0] == '\0')
             strcpy(trigs[i].interface, g_cfg.interface);
+        if ((int)trigs[i].close_on < 0)
+            trigs[i].close_on = g_cfg.close_on;
         /* The name goes into nft rules, so allow only what an interface name
          * plausibly holds (and fits IFNAMSIZ). */
         size_t il = strspn(trigs[i].interface, "abcdefghijklmnopqrstuvwxyz"
@@ -584,14 +644,32 @@ int config_parse_string(const char *text, char *err, size_t errlen)
             /* Each trigger's table drops its ports on its interface for
              * everyone not in its own allowed set, and a drop in any nft table
              * is final, so two triggers on one port and interface would keep
-             * it closed to every client. */
+             * it closed to every client. With close_on = all the drop rule
+             * covers every interface, so the interfaces do not matter. */
+            int any_all = trigs[i].close_on == CLOSE_ON_ALL ||
+                          trigs[j].close_on == CLOSE_ON_ALL;
             if (trigs[i].protocol != trigs[j].protocol ||
-                strcmp(trigs[i].interface, trigs[j].interface) != 0)
+                (!any_all &&
+                 strcmp(trigs[i].interface, trigs[j].interface) != 0))
                 continue;
             for (size_t a = 0; a < trigs[i].n_ports; a++)
                 for (size_t b = 0; b < trigs[j].n_ports; b++)
                     if (trigs[i].ports[a] == trigs[j].ports[b])
                     {
+                        if (any_all)
+                        {
+                            snprintf(err, errlen,
+                                     "triggers '%s' and '%s' both manage %s "
+                                     "port %d and one uses close_on = all, "
+                                     "which drops the port on every "
+                                     "interface; a port can belong to only "
+                                     "one trigger then",
+                                     trigs[j].service, trigs[i].service,
+                                     trigs[i].protocol == PROTO_UDP ? "udp"
+                                                                    : "tcp",
+                                     trigs[i].ports[a]);
+                            goto fail;
+                        }
                         snprintf(err, errlen,
                                  "triggers '%s' and '%s' both manage %s port "
                                  "%d on %s; a port can belong to only one "

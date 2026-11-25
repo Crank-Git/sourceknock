@@ -673,6 +673,109 @@ static void test_knock_port(void)
     }
 }
 
+/* close_on: the built-in default is `interface`; [global] sets the default
+ * wherever it appears; a trigger overrides it. */
+static void test_close_on(void)
+{
+    char err[256];
+    const char *d = "[trigger:a]\nport = 22\nsequence = 1,2,3\n";
+    CHECK_EQ_INT(parse(d, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.close_on, CLOSE_ON_INTERFACE);
+    CHECK_EQ_INT(g_cfg.triggers[0].close_on, CLOSE_ON_INTERFACE);
+
+    const char *c = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "[trigger:b]\nport = 80\nsequence = 4,5,6\n"
+                    "close_on = interface\n"
+                    "[global]\nclose_on = all\n";
+    CHECK_EQ_INT(parse(c, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.close_on, CLOSE_ON_ALL);
+    CHECK_EQ_INT(g_cfg.triggers[0].close_on, CLOSE_ON_ALL);
+    CHECK_EQ_INT(g_cfg.triggers[1].close_on, CLOSE_ON_INTERFACE);
+
+    const char *o = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "close_on = all\n";
+    CHECK_EQ_INT(parse(o, err, sizeof(err)), 0);
+    CHECK_EQ_INT(g_cfg.triggers[0].close_on, CLOSE_ON_ALL);
+}
+
+/* A value other than interface or all is a config error that names it. */
+static void test_close_on_bad_value(void)
+{
+    char err[256];
+    const char *g = "[global]\nclose_on = everywhere\n";
+    CHECK(parse(g, err, sizeof(err)) == -1);
+    CHECK(strstr(err, "everywhere") != NULL);
+    CHECK(strstr(err, "close_on") != NULL);
+
+    const char *t = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "close_on = ALL\n";
+    CHECK(parse(t, err, sizeof(err)) == -1);
+    CHECK(strstr(err, "ALL") != NULL);
+    CHECK_EQ_INT(g_cfg.n_triggers, 0);
+}
+
+/* close_on = all drops the port on every interface, so it clashes with any
+ * trigger on the same port and protocol, whatever the interfaces. */
+static void test_close_on_all_shared_port(void)
+{
+    char err[256];
+    const char *c = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "interface = eth0\nclose_on = all\n"
+                    "[trigger:b]\nport = 22\nsequence = 4,5,6\n"
+                    "interface = wg0\n";
+    CHECK(parse(c, err, sizeof(err)) == -1);
+    CHECK(strstr(err, "tcp port 22") != NULL);
+    CHECK(strstr(err, "close_on = all") != NULL);
+
+    /* the second trigger is the one that uses `all` */
+    const char *r = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "interface = eth0\n"
+                    "[trigger:b]\nport = 22\nsequence = 4,5,6\n"
+                    "interface = wg0\nclose_on = all\n";
+    CHECK(parse(r, err, sizeof(err)) == -1);
+
+    /* a different protocol or port is fine */
+    const char *ok = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                     "interface = eth0\nclose_on = all\n"
+                     "[trigger:b]\nport = 22\nprotocol = udp\n"
+                     "sequence = 4,5,6\ninterface = wg0\n"
+                     "[trigger:c]\nport = 23\nsequence = 7,8,9\n"
+                     "interface = wg0\n";
+    CHECK_EQ_INT(parse(ok, err, sizeof(err)), 0);
+}
+
+/* The warning lists the other interfaces, never lo or the trigger's own, and
+ * only for close_on = interface. */
+static void test_open_interfaces_warning(void)
+{
+    char err[256], msg[320];
+    const char *c = "[trigger:a]\nport = 22\nsequence = 1,2,3\n"
+                    "interface = eth0\n"
+                    "[trigger:b]\nport = 80\nsequence = 4,5,6\n"
+                    "interface = eth0\nclose_on = all\n";
+    CHECK_EQ_INT(parse(c, err, sizeof(err)), 0);
+    const char *names[] = {"lo", "eth0", "eth1", "wg0"};
+
+    CHECK_EQ_INT(config_open_interfaces_warning(&g_cfg.triggers[0], names, 4,
+                                                msg, sizeof(msg)),
+                 1);
+    CHECK_EQ_STR(msg, "close_on = interface leaves its ports open on eth1, "
+                      "wg0; set close_on = all to block them");
+
+    /* close_on = all: nothing stays open */
+    CHECK_EQ_INT(config_open_interfaces_warning(&g_cfg.triggers[1], names, 4,
+                                                msg, sizeof(msg)),
+                 0);
+
+    /* only lo and its own interface: no warning */
+    CHECK_EQ_INT(config_open_interfaces_warning(&g_cfg.triggers[0], names, 2,
+                                                msg, sizeof(msg)),
+                 0);
+    CHECK_EQ_INT(config_open_interfaces_warning(&g_cfg.triggers[0], names, 0,
+                                                msg, sizeof(msg)),
+                 0);
+}
+
 int main(void)
 {
     printf("== config parser tests ==\n");
@@ -708,6 +811,10 @@ int main(void)
     TEST_RUN(test_secret_file);
     TEST_RUN(test_examples_parse);
     TEST_RUN(test_knock_port);
+    TEST_RUN(test_close_on);
+    TEST_RUN(test_close_on_bad_value);
+    TEST_RUN(test_close_on_all_shared_port);
+    TEST_RUN(test_open_interfaces_warning);
     config_free();
     TEST_SUMMARY();
 }

@@ -61,6 +61,7 @@ cleanup() {
   sudo pkill -9 -x sourceknock 2>/dev/null
   sudo ip addr del $CLIENT/24 dev e2e-c 2>/dev/null
   sudo ip link del e2e-c 2>/dev/null
+  sudo ip link del e2e-c2 2>/dev/null
   sudo ip link del sktun0 2>/dev/null
   # tidy leftover state from a previous interrupted run
   sudo ip netns del e2etest 2>/dev/null
@@ -405,6 +406,45 @@ else
   check "gre link refused with a reason (exit $rc)" 1 0; cat "$WORK/gre.log"
 fi
 sudo ip netns exec "$NS" ip link del skgre0
+
+# close_on: a second interface in the namespace. With close_on = interface the
+# port stays open there, and the daemon warns about it; with close_on = all the
+# port is dropped there too, and a knock on the trigger's own interface still
+# opens it.
+echo "--- close_on (second interface) ---"
+CO_PORT=$((PORT+15))
+sudo ip link add e2e-c2 type veth peer name e2e-s2
+sudo ip link set e2e-s2 netns "$NS"
+sudo ip addr add 10.21.0.1/24 dev e2e-c2
+sudo ip link set e2e-c2 up
+sudo ip netns exec "$NS" ip addr add 10.21.0.2/24 dev e2e-s2
+sudo ip netns exec "$NS" ip link set e2e-s2 up
+CO_UP="$WORK/co_listen_up"
+sudo ip netns exec "$NS" env SK_LISTEN_HOST=0.0.0.0 setsid python3 "$LISTENER" "$CO_PORT" "$CO_UP" >"$WORK/co_listener.log" 2>&1 </dev/null &
+wait_file "$CO_UP" || { echo "FAIL close_on listener never came up"; fail=$((fail+1)); }
+for CO in interface all; do
+  printf '[global]\ninterface = e2e-s\nclose_on = %s\n[trigger:coe2e]\nport = %s\nsequence = %s\nwindow = 5\nmode = fixed_ttl\nduration = 30\n' "$CO" "$CO_PORT" "$SEQ" > "$WORK/co.conf"
+  sudo ip netns exec "$NS" "$BIN" -t "$WORK/co.conf" >"$WORK/co_t.log" 2>&1
+  if [ "$CO" = "interface" ]; then
+    grep -q "warning: close_on = interface leaves its ports open on .*e2e-s2; set close_on = all" "$WORK/co_t.log" && check "-t warns about the open second interface" 1 1 || { check "-t warns about the open second interface" 1 0; cat "$WORK/co_t.log"; }
+  else
+    grep -q "close_on" "$WORK/co_t.log" && check "-t: close_on = all gives no warning" 1 0 || check "-t: close_on = all gives no warning" 1 1
+  fi
+  start_daemon "$WORK/co.conf" || { echo "FAIL close_on daemon never started"; tail -5 "$LOG"; fail=$((fail+1)); }
+  if [ "$CO" = "interface" ]; then
+    grep -q "warning: close_on = interface leaves its ports open on .*e2e-s2" "$LOG" && check "start warns about the open second interface" 1 1 || { check "start warns about the open second interface" 1 0; cat "$LOG"; }
+    if python3 "$DRIVER" probe 10.21.0.2 "$CO_PORT" 1.0; then check "close_on = interface: port open on the second interface" 1 1; else check "close_on = interface: port open on the second interface" 1 0; fi
+    if python3 "$DRIVER" probe "$SERVER" "$CO_PORT" 1.0; then check "close_on = interface: port closed on its own interface" 0 1; else check "close_on = interface: port closed on its own interface" 0 0; fi
+  else
+    if python3 "$DRIVER" probe 10.21.0.2 "$CO_PORT" 1.0; then check "close_on = all: port closed on the second interface" 0 1; else check "close_on = all: port closed on the second interface" 0 0; fi
+    "$KNOCK" -s "$CLIENT" -d 50 -p "$CO_PORT" "$SERVER" "$SEQ"
+    sleep 0.5
+    if python3 "$DRIVER" probe "$SERVER" "$CO_PORT" 1.0; then check "close_on = all: knock opens the port on its own interface" 1 1; else check "close_on = all: knock opens the port on its own interface" 1 0; fi
+  fi
+  sudo kill -TERM "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null
+done
+sudo pkill -f "listener\.py $CO_PORT" 2>/dev/null
+sudo ip link del e2e-c2 2>/dev/null
 
 # knock_port: one daemon runs the main trigger plus a trigger that only counts
 # frames sent to destination port 4444. The main trigger (no knock_port) sees

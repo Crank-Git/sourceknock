@@ -14,7 +14,8 @@
  * port closing) # one accept (per family) + one drop rule per service port: ip
  * saddr @allowed_v4 <proto> dport <port1> accept ip6 saddr @allowed_v6 <proto>
  * dport <port1> accept iifname "<iface>" <proto> dport <port1> drop (port
- * closed by default for everyone else on the trigger's interface)
+ * closed by default for everyone else on the trigger's interface; with
+ * close_on = all the rule has no iifname match)
  *       ... (repeat for port2, port3, ...) *
  *     }
  *   }
@@ -22,6 +23,7 @@
 #ifndef SOURCEKNOCK_REWARD_H
 #define SOURCEKNOCK_REWARD_H
 
+#include "config.h"
 #include "packet.h"
 #include <netinet/in.h>
 #include <stdint.h>
@@ -62,8 +64,8 @@ int reward_parse_owner(const char *listing, char *out, size_t len);
  * transaction. It is public so tests can check the exact text. */
 int reward_script(char *buf, size_t len, const char *table,
                   const char *config_path, const char *iface,
-                  const uint16_t *ports, size_t n_ports, proto_t proto,
-                  long max_allowed);
+                  close_on_t close_on, const uint16_t *ports, size_t n_ports,
+                  proto_t proto, long max_allowed);
 
 /* Create table/set/chain if missing. Idempotent. Returns 0 on success. nft
  * applies the table in one transaction; if it fails, nothing is programmed,
@@ -73,13 +75,15 @@ int reward_script(char *buf, size_t len, const char *table,
  * each other's rules. `config_path` is the absolute path of the daemon's
  * config: it becomes the table's owner mark. `add table` does not change the
  * comment of a table that already exists, so a table made without a mark (by an
- * older version) stays unmarked. The drop rules match only packets arriving on
- * `iface`.
+ * older version) stays unmarked. With CLOSE_ON_INTERFACE the drop rules match
+ * only packets arriving on `iface`; with CLOSE_ON_ALL they match every
+ * interface.
  * Each allowed set holds at most `max_allowed` addresses (re-running it with a
  * new size resizes the sets and keeps their elements). */
 int reward_init(reward_t *r, const char *table, const char *config_path,
-                const char *iface, const uint16_t *ports, size_t n_ports,
-                proto_t proto, double fallback_ttl, long max_allowed);
+                const char *iface, close_on_t close_on, const uint16_t *ports,
+                size_t n_ports, proto_t proto, double fallback_ttl,
+                long max_allowed);
 
 /* Open the port for `ip`. `family` is AF_INET or AF_INET6 and `ip` points at
  * the matching address struct. `timeout` is the kernel-enforced lifetime of the

@@ -13,8 +13,9 @@ static void test_script_tcp_two_ports(void)
 {
     uint16_t ports[] = {22, 2222};
     char buf[4096];
-    int rc = reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER,
-                           "eth0", ports, 2, PROTO_TCP, 256);
+    int rc =
+        reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER, "eth0",
+                      CLOSE_ON_INTERFACE, ports, 2, PROTO_TCP, 256);
     CHECK_EQ_INT(rc, 0);
     CHECK_EQ_STR(
         buf,
@@ -53,7 +54,7 @@ static void test_script_udp_one_port(void)
     uint16_t ports[] = {5353};
     char buf[4096];
     int rc = reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER, "wg0",
-                           ports, 1, PROTO_UDP, 256);
+                           CLOSE_ON_INTERFACE, ports, 1, PROTO_UDP, 256);
     CHECK_EQ_INT(rc, 0);
     CHECK(strstr(buf, "udp dport 5353 accept") != NULL);
     CHECK(strstr(buf, "tcp flags") == NULL);
@@ -61,13 +62,33 @@ static void test_script_udp_one_port(void)
     CHECK(strncmp(buf, SETS_FMT_HEAD, strlen(SETS_FMT_HEAD)) == 0);
 }
 
+/* close_on = all: the drop rule has no iifname match, for both protocols. */
+static void test_script_close_on_all(void)
+{
+    uint16_t ports[] = {22};
+    char buf[4096];
+    int rc = reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER,
+                           "eth0", CLOSE_ON_ALL, ports, 1, PROTO_TCP, 256);
+    CHECK_EQ_INT(rc, 0);
+    CHECK(strstr(buf, "add rule inet sourceknock_t service tcp dport 22 "
+                      "drop\n") != NULL);
+    CHECK(strstr(buf, "iifname") == NULL);
+
+    rc = reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER, "eth0",
+                       CLOSE_ON_ALL, ports, 1, PROTO_UDP, 256);
+    CHECK_EQ_INT(rc, 0);
+    CHECK(strstr(buf, "service udp dport 22 drop\n") != NULL);
+    CHECK(strstr(buf, "iifname") == NULL);
+}
+
 /* max_allowed reaches both set sizes. */
 static void test_script_max_allowed(void)
 {
     uint16_t ports[] = {22};
     char buf[4096];
-    int rc = reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER,
-                           "eth0", ports, 1, PROTO_TCP, 1024);
+    int rc =
+        reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER, "eth0",
+                      CLOSE_ON_INTERFACE, ports, 1, PROTO_TCP, 1024);
     CHECK_EQ_INT(rc, 0);
     CHECK(strstr(buf, "allowed_v4 { type ipv4_addr; flags timeout; size "
                       "1024; }\n") != NULL);
@@ -80,11 +101,12 @@ static void test_script_buffer_too_small(void)
 {
     uint16_t ports[] = {22, 2222};
     char buf[64];
-    int rc = reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER,
-                           "eth0", ports, 2, PROTO_TCP, 256);
+    int rc =
+        reward_script(buf, sizeof(buf), "inet sourceknock_t", OWNER, "eth0",
+                      CLOSE_ON_INTERFACE, ports, 2, PROTO_TCP, 256);
     CHECK_EQ_INT(rc, -1);
-    rc = reward_script(buf, 0, "inet sourceknock_t", OWNER, "eth0", ports, 2,
-                       PROTO_TCP, 256);
+    rc = reward_script(buf, 0, "inet sourceknock_t", OWNER, "eth0",
+                       CLOSE_ON_INTERFACE, ports, 2, PROTO_TCP, 256);
     CHECK_EQ_INT(rc, -1);
 }
 
@@ -123,8 +145,8 @@ static void test_script_rejects_bad_owner(void)
     uint16_t ports[] = {22};
     char buf[4096];
     CHECK_EQ_INT(reward_script(buf, sizeof(buf), "inet sourceknock_t",
-                               "/etc/a\"; flush ruleset; \"", "eth0", ports, 1,
-                               PROTO_TCP, 256),
+                               "/etc/a\"; flush ruleset; \"", "eth0",
+                               CLOSE_ON_INTERFACE, ports, 1, PROTO_TCP, 256),
                  -1);
 }
 
@@ -171,6 +193,7 @@ int main(void)
 {
     TEST_RUN(test_script_tcp_two_ports);
     TEST_RUN(test_script_udp_one_port);
+    TEST_RUN(test_script_close_on_all);
     TEST_RUN(test_script_max_allowed);
     TEST_RUN(test_script_buffer_too_small);
     TEST_RUN(test_owner_mark);
