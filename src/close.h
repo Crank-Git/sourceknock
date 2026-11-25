@@ -15,10 +15,10 @@
 #include <stdint.h>
 
 /* Does a captured frame count toward this trigger's knock (primary and admin
- * sequences)? Never for a TCP segment with ACK set and SYN clear: it belongs
- * to a flow that is already open, and a TCP knock is a SYN. Otherwise always,
- * unless the trigger sets knock_port, in which case only frames sent to that
- * destination port do. */
+ * sequences)? Never for a TCP segment with ACK set: it belongs to a flow that
+ * is already open (or is a SYN+ACK reply), and a TCP knock is a plain SYN.
+ * Otherwise always, unless the trigger sets knock_port, in which case only
+ * frames sent to that destination port do. */
 int knock_counts(const trigger_t *tr, const pkt_info_t *pkt);
 
 /* Is `port` one of the trigger's service ports? */

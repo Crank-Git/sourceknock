@@ -3,11 +3,10 @@
 
 int knock_counts(const trigger_t *tr, const pkt_info_t *pkt)
 {
-    /* An open flow's segments (data, keepalives, ACKs) are not knock packets.
-     * Counting them would reset a knock whenever the client has a busy
-     * session open. */
-    if (pkt->proto == PROTO_TCP && (pkt->tcp_flags & PKT_TCP_ACK) &&
-        !(pkt->tcp_flags & PKT_TCP_SYN))
+    /* A TCP segment with ACK set (data, keepalives, a SYN+ACK reply) is not a
+     * knock packet; a TCP knock is a plain SYN. Counting
+     * them would reset a knock whenever the client has a busy session open. */
+    if (pkt->proto == PROTO_TCP && (pkt->tcp_flags & PKT_TCP_ACK))
         return 0;
     return tr->knock_port == 0 || pkt->dport == tr->knock_port;
 }

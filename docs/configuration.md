@@ -115,7 +115,7 @@ closed port sends, so a scan still sees nothing.
   existing session, a browser, other hosts behind the same NAT) can reset a
   knock in progress, and replies to the server's own outbound connections
   (which arrive from the remote's service port) can look like knock steps.
-  TCP segments of a flow that is already open (ACK set, SYN clear) never count,
+  TCP segments of a flow that is already open (ACK set) never count,
   so a busy TCP session can't reset a knock. UDP traffic from the same client
   (for example a WireGuard or QUIC flow) still counts: **set `knock_port` on
   every trigger whose clients can have such a UDP flow open while they knock**,
