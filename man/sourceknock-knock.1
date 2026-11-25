@@ -12,6 +12,12 @@ sourceknock-knock \- send a source-port knock to a sourceknock server
 .RB [ \-4 | \-6 ]
 .I host
 .I sequence
+.br
+.B sourceknock-knock
+.BI \-K " keyfile"
+.RB [ \-r ]
+.RI [ options ]
+.I host
 .SH DESCRIPTION
 .B sourceknock-knock
 sends one UDP datagram per port in
@@ -49,6 +55,20 @@ Local address to send from (default: any).
 .TP
 .BR \-4 ", " \-6
 Use IPv4 or IPv6 only.
+.TP
+.BI \-K " keyfile"
+For a trigger with
+.BR secret_file :
+derive the sequence from this copy of its secret and the current time, instead
+of giving a
+.IR sequence .
+The sequence changes every 30 seconds and each one works once, so knocking
+again within 30 seconds is refused; wait for the next step.
+.TP
+.B \-r
+With
+.BR \-K :
+send the revoke knock, which removes your address from the allowed set.
 .TP
 .B \-h
 Show usage.

@@ -33,13 +33,14 @@ Standard port knocking puts the secret in the destination port sequence, and any
 
 The daemon watches received frames on an `AF_PACKET` socket, follows each client partway through a knock, and when the ordered sequence lands inside the window it adds that client's IP to an nftables set. The service port opens for that IP only, then closes again after a fixed TTL, on first connect, or on an admin revoke. Sessions that are already up keep working when it closes.
 
-Be clear about what this buys you. Source ports are as spoofable as any L4 header field, so this is stealth, not authentication. Your service's own auth (SSH keys) still does the real work.
+Be clear about what this buys you. Source ports are as spoofable as any L4 header field, so this is stealth, not authentication. A `secret_file` trigger makes the sequence change every 30 seconds, like a 2FA code, so a knock someone saw can't be replayed. Your service's own auth (SSH keys) still does the real work.
 
 ## Requirements
 
 - **The daemon:** Linux with kernel headers to build, nftables (`nft`, validated on 1.0.9), and `CAP_NET_RAW` + `CAP_NET_ADMIN` to run. The systemd units grant exactly those to an unprivileged `sourceknock` user.
 - **The client:** Linux or macOS. Source ports below 1024 need root on Linux.
 - **Building:** a C11 compiler and `make`; `python3` for the client tests.
+- **Synced clocks** (NTP) on server and client, for `secret_file` triggers: they may differ by about 30 seconds.
 - **Source ports that survive the path.** Carrier-grade NAT and some corporate firewalls rewrite them, and then no knock arrives intact. See [NAT](docs/operations.md#nat).
 
 ## Install
@@ -95,47 +96,50 @@ Keep another way into the host the first time you try this. If the knock never a
 
 ## Configuration
 
-The parser strips only full-line comments (lines starting with `#` or `;`). A comment after a value is **not** stripped and becomes part of the value, so keep value lines clean.
+Comments start with `#` or `;`, on their own line or after a value (`port = 22  # ssh`). A `#` or `;` inside a word, such as in a path, is kept.
 
 | Key | What it does |
 |---|---|
-| `interface` | The capture interface: the one that sees the client's frames. Ethernet, loopback, tun, WireGuard, PPP and ipip / ip6tnl / sit work. |
+| `interface` | The interface that sees the client's frames. The trigger reads knocks and closes its ports only there, so other interfaces (a VPN, `lo`) are left alone. Set in `[global]`, or per trigger to guard services on several interfaces from one daemon. Ethernet, loopback, tun, WireGuard, PPP and ipip / ip6tnl / sit work. |
 | `port` | `22`, `80, 443`, or `8000-8002`. A knock opens all of them. |
 | `protocol` | `tcp` or `udp`. |
 | `sequence` | The ordered source ports. Use three or more, outside 32768-60999, or the daemon warns. |
+| `secret_file` | Instead of `sequence`: a file holding a shared secret. The sequence then changes every 30 seconds, like a 2FA code, and each one works only once. See [time-based knocks](docs/configuration.md#time-based-knocks). |
 | `window` | Seconds the whole sequence has to finish in. |
-| `mode` | `fixed_ttl` (open for `duration` seconds), `close_on_connect` (close on the first connection, with `fallback_ttl` as a kernel-enforced backstop), or `permanent` (until `admin_sequence` revokes it). |
+| `mode` | `fixed_ttl` (open for `duration` seconds), `close_on_connect` (close on the first connection, with `fallback_ttl` as a kernel-enforced backstop), or `permanent` (until `admin_sequence`, or `sourceknock-knock -K FILE -r`, revokes it). |
 | `knock_port` | Optional. Only frames sent to this destination port count, so other traffic from the same address can't reset a knock. Knock with `-p`. |
+| `max_allowed` | Optional. Most client addresses let in at once (default 256). |
 
-The daemon refuses to start on a config it can't use and says why. Every key, the closing rules per mode and protocol, and the startup checks are in the [configuration reference](docs/configuration.md). The [examples](examples) cover SSH, web and WireGuard.
+The daemon refuses to start on a config it can't use and says why. Every key, the closing rules per mode and protocol, and the startup checks are in the [configuration reference](docs/configuration.md). The [examples](examples) cover SSH, web, WireGuard, and a time-based SSH knock.
 
 ## Usage
 
 ```sh
 sourceknock-knock [-p PORT] [-d MS] [-s ADDR] [-4|-6] HOST SEQUENCE
+sourceknock-knock -K KEYFILE [-r] [options] HOST
 ```
 
-`-p` is the destination port (the trigger's `knock_port`, default 9), `-d` the delay between steps in milliseconds (default 50; keep the whole knock inside `window`), `-s` the local address. See `man sourceknock-knock`.
+`-p` is the destination port (the trigger's `knock_port`, default 9), `-d` the delay between steps in milliseconds (default 50; keep the whole knock inside `window`), `-s` the local address. `-K` knocks a `secret_file` trigger with your copy of its secret (no sequence needed), and `-r` sends its revoke knock instead. See `man sourceknock-knock`.
 
 ```sh
 # a trigger with knock_port = 4444, over IPv6
 sourceknock-knock -6 -p 4444 server.example.com 7000,8000,9000
 ```
 
-The daemon takes one argument, the config path, and reads `/etc/sourceknock/sourceknock.conf` without one. The template unit runs one daemon per config: `systemctl enable --now sourceknock@myconf` reads `/etc/sourceknock/myconf.conf`.
+The daemon takes the config path, and reads `/etc/sourceknock/sourceknock.conf` without one. Check a config with `sourceknock -t <path>` before restarting: if the daemon refuses a new config, the old tables keep the ports closed. The template unit runs one daemon per config: `systemctl enable --now sourceknock@myconf` reads `/etc/sourceknock/myconf.conf`. Run one daemon per host: one config covers every service and interface. To apply config changes, `systemctl reload sourceknock` (SIGHUP): a bad config is refused and the running one kept, and clients already let in stay in.
 
 ## How it works
 
 Only frames the host receives count; ordinary traffic creates no state, and at most 4096 clients per trigger are tracked mid-knock. IPv4 and IPv6 are both decoded, with IPv6 extension headers walked up to 8 hops. Each trigger gets its own `inet sourceknock_<service>` table with `allowed_v4` and `allowed_v6` sets, and the TTLs are nft element timeouts, so the kernel closes the port even if the daemon dies.
 
-When the daemon stops, it removes every allowed client but **leaves its table in place**, so the port stays closed. To open it to everyone after removing sourceknock, run `sudo nft delete table inet sourceknock_ssh` (one table per trigger).
+When the daemon stops, it removes every allowed client but **leaves its table in place**, so the port stays closed. To open it to everyone after removing sourceknock, run `sudo nft delete table inet sourceknock_ssh` (one table per trigger). On start the daemon deletes `sourceknock_*` tables that aren't in its config, so renaming or removing a trigger doesn't leave its port closed.
 
 ## Documentation
 
 | Page | What's there |
 |---|---|
-| [Configuration](docs/configuration.md) | Every key, the modes, what closing means for TCP and UDP, startup checks, IPv6. |
-| [Operations](docs/operations.md) | Running directly and under systemd, NAT, limits, and troubleshooting. |
+| [Configuration](docs/configuration.md) | Every key, the modes, time-based knocks, what closing means for TCP and UDP, startup checks, IPv6. |
+| [Operations](docs/operations.md) | Running directly and under systemd, reloading, NAT, limits, and troubleshooting. |
 | [Contributing](CONTRIBUTING.md) | Build, tests, e2e and systemd tests, fuzzing, CI, releases, branches. |
 | `man sourceknock`, `man sourceknock-knock` | The same reference, installed with `make install`. |
 
@@ -159,7 +163,7 @@ sudo bash tests/e2e_integration.sh tests/e2e_close.conf
 
 ## Security
 
-This is obfuscation. Anyone who can see a knock can replay it from the same address, and anyone who can spoof source ports and addresses can forge one. Keep your service's own authentication on, and don't rely on sourceknock as the only control.
+With a fixed `sequence` this is obfuscation: anyone who can see a knock can replay it from the same address, and anyone who can spoof source ports and addresses can forge one. With `secret_file` a knock someone sees can't be replayed (each 30-second sequence works once), but a knock is still not proof of who sent it. Keep your service's own authentication on, and don't rely on sourceknock as the only control.
 
 ## License
 

@@ -29,19 +29,23 @@ admin_sequence = 9000,8000,7000
 # optional: only frames sent to this destination port count toward the knock
 # (then knock with `sourceknock-knock -p 4444 ...`)
 # knock_port = 4444
+# optional: this trigger's interface (defaults to [global] interface)
+# interface = wg0
 ```
 
-> **Note:** the parser strips only full-line comments (lines starting with `#`
-> or `;`). Inline comments after a value are **not** stripped, so keep value
-> lines free of trailing `#`/`;` (see the notes in `examples/`).
+> **Note:** comments start with `#` or `;`, either on their own line or after
+> a value (`port = 22  # ssh`). A `#` or `;` inside a word, such as in a path,
+> is kept.
 
 ## Startup checks
 
 The daemon refuses to start on a config it can't use: a key outside any
 section, a trigger without `port` or `sequence`, a source port of 0 in a
-sequence, or two triggers whose service names map to the same nftables table
+sequence, two triggers whose service names map to the same nftables table
 (names are sanitized to `[A-Za-z0-9_]`, so `web-1` and `web_1` collide, and must
-be at most 46 characters). It logs a warning (but starts) for a sequence
+be at most 46 characters), or two triggers that manage the same port and
+protocol on the same interface (each one's drop rule would block the other's
+clients, so nobody could get in). It logs a warning (but starts) for a sequence
 shorter than 3 ports or one using the Linux ephemeral range 32768-60999, which
 ordinary outgoing connections use.
 
@@ -57,14 +61,24 @@ closed port sends, so a scan still sees nothing.
 
 ## Keys and modes
 
+- `interface` — the interface a trigger reads knocks from **and** closes its
+  ports on. Set it in `[global]` as the default for every trigger, and
+  optionally per trigger to override it, so one daemon can guard services on
+  several interfaces (e.g. `eth0` and `wg0`). The drop rules match only packets
+  arriving on that interface: the same port reached over any other interface
+  (a VPN such as `tailscale0`, or `lo`) is not touched, so it can't lock you
+  out there. Ethernet, loopback, tun, WireGuard, PPP and ipip / ip6tnl / sit
+  links work.
+
 - `mode = fixed_ttl` — keep the port open for `duration` seconds, then close.
 - `mode = close_on_connect` — close as soon as the client makes a connection
   (with `fallback_ttl` as a safety net so a client that never connects can't
   leave the port open forever). The safety net is the nft element's own
   timeout, so the kernel closes the port even if the daemon sees no further
   traffic, is stopped, or crashes.
-  - **TCP:** the first packet to a service port (the connection's SYN) closes
-    the port.
+  - **TCP:** the first new connection (a SYN) to a service port closes the
+    port. Packets of a session that is already open (keepalives, data) don't,
+    so knocking again while connected still lets a second connection in.
   - **UDP:** there is no handshake, so the first *subsequent* UDP packet to a
     service port closes the port. The arming knock itself does **not** close
     the port the instant it opens — only a later packet to the service port
@@ -83,11 +97,46 @@ closed port sends, so a scan still sees nothing.
   Send the knock to this port (pick one nothing listens on, and not a service
   port, so in `close_on_connect` mode a re-knock can't close the port). The
   close-on-connect detection is unaffected.
+- `max_allowed` (optional, default 256) — the most client addresses let in at
+  once, per address family (the size of the nftables allowed sets). When it's
+  full, a correct knock logs `reward_open FAILED` and doesn't open the port.
 - `port` accepts a single port, a comma-separated list, or an inclusive range,
   e.g. `port = 22`, `port = 80, 443`, or `port = 8000-8002`. On a successful
   knock **all** listed ports are opened for the client (each port gets its own
   nftables accept/drop rule, sharing one per-family "allowed" set). Ports must
   be in 1..65535.
+
+## Time-based knocks
+
+Set `secret_file` instead of `sequence` and the knock is derived from a shared
+secret and the clock, like a 2FA code:
+
+- Every 30 seconds there is a new 4-port sequence (ports 1024-32767), computed
+  as HMAC-SHA256 of the secret and the time step.
+- The daemon accepts the previous, current and next step, so client and
+  server clocks may differ by about 30 seconds. **Keep both clocks synced**
+  (NTP; Ubuntu does this by default). A server clock that drifts further makes
+  every knock fail.
+- Each step's sequence opens the port **once**. Repeating it, from any
+  address, is refused and logged ("already used"), so a knock someone sees
+  can't be replayed. If you knock twice within 30 seconds, the second one is
+  refused; wait for the next step.
+- The revoke knock is derived from the same secret (`sourceknock-knock -K
+  FILE -r`); `admin_sequence` can't be combined with `secret_file`.
+
+Create a secret (at least 16 bytes; the file's bytes, minus trailing
+whitespace, are the key) and give the daemon read access:
+
+```sh
+head -c 32 /dev/urandom | base64 | sudo tee /etc/sourceknock/ssh.key >/dev/null
+sudo chown root:sourceknock /etc/sourceknock/ssh.key
+sudo chmod 0640 /etc/sourceknock/ssh.key
+```
+
+Copy the same file to each client (keep it private) and knock with
+`sourceknock-knock -K ~/.config/sourceknock/ssh.key server.example.com`. The
+secret is read at start and on every reload, so a new secret takes effect with
+`systemctl reload sourceknock`.
 
 ## IPv4 and IPv6
 
