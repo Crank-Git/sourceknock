@@ -175,6 +175,34 @@ other interface (a VPN, loopback) is left alone. One daemon can guard
 services on several interfaces this way. An interface that is down, deleted
 or not there yet does not stop the daemon: that trigger's ports stay closed
 and knocks are read there again once it is up.
+.IP \(bu 2
+.B close_on
+Optional:
+.B interface
+or
+.BR all .
+Where the drop rules apply; defaults to the
+.B [global]
+.BR close_on ,
+and the built-in default is
+.BR interface .
+With
+.B interface
+the drop rules match only the trigger's interface, so the port stays open on
+the host's other interfaces. At start, at reload and in
+.B \-t
+the daemon logs one warning for each such trigger. It names the other
+interfaces (not
+.BR lo )
+and says to set
+.BR "close_on = all" .
+With
+.B all
+the drop rules have no interface match, so the port is closed on every
+interface, including loopback. Knocks are still read only on the trigger's
+interface. Two triggers may not manage the same port and protocol when either
+one uses
+.BR all .
 .RE
 .PP
 Several daemons may run on one host, each with its own configuration.
@@ -187,7 +215,9 @@ deleted: the daemon logs a warning that names it. The mark needs nftables with
 table comments (tested with nft 1.0.9, Linux 5.10 or later) and a path of at
 most 116 characters. A table made by an earlier version has no mark and is
 kept. Two triggers may not manage
-the same port and protocol on the same interface.
+the same port and protocol on the same interface, or on any interfaces when
+either one uses
+.BR "close_on = all" .
 .SH MODES
 .RS 4
 .IP \(bu 2

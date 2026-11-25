@@ -168,8 +168,8 @@ int reward_parse_owner(const char *listing, char *out, size_t len)
 
 int reward_script(char *buf, size_t len, const char *table,
                   const char *config_path, const char *iface,
-                  const uint16_t *ports, size_t n_ports, proto_t proto,
-                  long max_allowed)
+                  close_on_t close_on, const uint16_t *ports, size_t n_ports,
+                  proto_t proto, long max_allowed)
 {
     if (len == 0)
         return -1;
@@ -241,11 +241,17 @@ int reward_script(char *buf, size_t len, const char *table,
                         "== ack accept\n",
                         table, chain, port);
 
-        /* Only on the trigger's own interface: other interfaces (a VPN,
-         * loopback) are left alone, so they never lock anyone out. */
-        bad |= emit(buf, len, &u,
-                    "add rule %s %s iifname \"%s\" %s dport %u drop\n", table,
-                    chain, iface, proto_str(proto), port);
+        /* close_on = interface: only the trigger's own interface, so other
+         * interfaces (a VPN, loopback) are left alone and never lock anyone
+         * out. close_on = all: every interface, so the port is closed on a
+         * second public interface too. */
+        if (close_on == CLOSE_ON_ALL)
+            bad |= emit(buf, len, &u, "add rule %s %s %s dport %u drop\n",
+                        table, chain, proto_str(proto), port);
+        else
+            bad |= emit(buf, len, &u,
+                        "add rule %s %s iifname \"%s\" %s dport %u drop\n",
+                        table, chain, iface, proto_str(proto), port);
     }
     return bad ? -1 : 0;
 }
@@ -316,8 +322,9 @@ static int run_nft_script(const char *script)
 }
 
 int reward_init(reward_t *r, const char *table, const char *config_path,
-                const char *iface, const uint16_t *ports, size_t n_ports,
-                proto_t proto, double fallback_ttl, long max_allowed)
+                const char *iface, close_on_t close_on, const uint16_t *ports,
+                size_t n_ports, proto_t proto, double fallback_ttl,
+                long max_allowed)
 {
     memset(r, 0, sizeof(*r));
     strncpy(r->table, table, sizeof(r->table) - 1);
@@ -337,8 +344,8 @@ int reward_init(reward_t *r, const char *table, const char *config_path,
     if (!script)
         return -1;
     char cmd[512];
-    int failed = reward_script(script, cap, r->table, config_path, iface, ports,
-                               n_ports, proto, max_allowed);
+    int failed = reward_script(script, cap, r->table, config_path, iface,
+                               close_on, ports, n_ports, proto, max_allowed);
     if (!failed)
         failed = run_nft_script(script);
     free(script);

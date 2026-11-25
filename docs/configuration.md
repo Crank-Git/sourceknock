@@ -31,6 +31,8 @@ admin_sequence = 9000,8000,7000
 # knock_port = 4444
 # optional: this trigger's interface (defaults to [global] interface)
 # interface = wg0
+# optional: where the drop rules apply, interface (default) or all
+# close_on = all
 ```
 
 > **Note:** comments start with `#` or `;`, either on their own line or after
@@ -45,7 +47,10 @@ sequence, two triggers whose service names map to the same nftables table
 (names are sanitized to `[A-Za-z0-9_]`, so `web-1` and `web_1` collide, and must
 be at most 46 characters), or two triggers that manage the same port and
 protocol on the same interface (each one's drop rule would block the other's
-clients, so nobody could get in). It logs a warning (but starts) for a sequence
+clients, so nobody could get in), or two triggers that manage the same port and
+protocol when either one uses `close_on = all` (that drop rule covers every
+interface). A `close_on` value other than `interface` or `all` is an error. It
+logs a warning (but starts) for a sequence
 shorter than 3 ports or one using the Linux ephemeral range 32768-60999, which
 ordinary outgoing connections use.
 
@@ -69,6 +74,21 @@ closed port sends, so a scan still sees nothing.
   (a VPN such as `tailscale0`, or `lo`) is not touched, so it can't lock you
   out there. Ethernet, loopback, tun, WireGuard, PPP and ipip / ip6tnl / sit
   links work.
+
+- `close_on = interface | all` — where the drop rules apply. Set it in
+  `[global]` as the default for every trigger, and optionally per trigger to
+  override it. The built-in default is `interface`.
+  - `interface`: the drop rules match only the trigger's interface (see
+    above). A host with a second public interface, or with IPv6 on another
+    interface, keeps the port open there with no knock. At start, at reload
+    and in `sourceknock -t`, the daemon logs one warning for each such trigger.
+    It lists the other interfaces on the host (not `lo`) and says to set
+    `close_on = all`:
+    `[ssh] warning: close_on = interface leaves its ports open on eth1; set close_on = all to block them`.
+  - `all`: the drop rules have no interface match, so the port is closed on
+    every interface, including `lo`. Local clients on the host need a knock
+    too. Knocks are still read only on the trigger's `interface`. Two triggers
+    can not share a port and protocol when either one uses `all`.
 
 - `mode = fixed_ttl` — keep the port open for `duration` seconds, then close.
 - `mode = close_on_connect` — close as soon as the client makes a connection

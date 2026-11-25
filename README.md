@@ -101,6 +101,7 @@ Comments start with `#` or `;`, on their own line or after a value (`port = 22  
 | Key | What it does |
 |---|---|
 | `interface` | The interface that sees the client's frames. The trigger reads knocks and closes its ports only there, so other interfaces (a VPN, `lo`) are left alone. Set in `[global]`, or per trigger to guard services on several interfaces from one daemon. Ethernet, loopback, tun, WireGuard, PPP and ipip / ip6tnl / sit work. |
+| `close_on` | `interface` (default) or `all`. With `interface`, the drop rules match only the trigger's own interface, and the daemon warns at start, at reload and in `-t` that the ports stay open on the host's other interfaces. With `all`, the drop rules match every interface, so the port is also closed on a second public interface (and on `lo`). Set in `[global]`, or per trigger. |
 | `port` | `22`, `80, 443`, or `8000-8002`. A knock opens all of them. |
 | `protocol` | `tcp` or `udp`. |
 | `sequence` | The ordered source ports. Use three or more, outside 32768-60999, or the daemon warns. |

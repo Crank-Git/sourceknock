@@ -369,6 +369,30 @@ static int load_keys(unsigned char (*keys)[TOTP_KEY_MAX], size_t *keylens)
     return 0;
 }
 
+/* The warning for a trigger whose ports stay open on the host's other
+ * interfaces (see config_open_interfaces_warning). Returns 1 with the text in
+ * `msg`, else 0. */
+static int open_interfaces_warning(const trigger_t *tr, char *msg, size_t n)
+{
+    struct if_nameindex *all = if_nameindex();
+    if (!all)
+        return 0;
+    size_t count = 0;
+    while (all[count].if_index != 0)
+        count++;
+    int warn = 0;
+    const char **names = calloc(count ? count : 1, sizeof(*names));
+    if (names)
+    {
+        for (size_t i = 0; i < count; i++)
+            names[i] = all[i].if_name;
+        warn = config_open_interfaces_warning(tr, names, count, msg, n);
+        free(names);
+    }
+    if_freenameindex(all);
+    return warn;
+}
+
 /* `-t`: everything startup would refuse that can be checked without
  * privileges, so a config can be checked before restarting the daemon (a
  * restart onto a bad config leaves the old tables closing the ports). */
@@ -381,6 +405,9 @@ static int check_config(const char *path)
         char why[160];
         if (config_weak_sequence(tr, why, sizeof(why)))
             fprintf(stderr, "[%s] warning: %s\n", tr->service, why);
+        char open_msg[320];
+        if (open_interfaces_warning(tr, open_msg, sizeof(open_msg)))
+            fprintf(stderr, "[%s] warning: %s\n", tr->service, open_msg);
         if (if_nametoindex(tr->interface) == 0)
         {
             fprintf(stderr, "[%s] interface '%s' does not exist\n", tr->service,
@@ -494,10 +521,13 @@ static int daemon_build(daemon_t *d, daemon_t *live, capture_t **caps_out,
         char why[160];
         if (config_weak_sequence(tr, why, sizeof(why)))
             sk_log("[%s] warning: %s", tr->service, why);
+        char open_msg[320];
+        if (open_interfaces_warning(tr, open_msg, sizeof(open_msg)))
+            sk_log("[%s] warning: %s", tr->service, open_msg);
 
         if (reward_init(&t->reward, table, g_config_abs, tr->interface,
-                        tr->ports, tr->n_ports, tr->protocol, tr->fallback_ttl,
-                        tr->max_allowed) != 0)
+                        tr->close_on, tr->ports, tr->n_ports, tr->protocol,
+                        tr->fallback_ttl, tr->max_allowed) != 0)
         {
             fprintf(stderr, "reward init failed for trigger '%s'\n",
                     tr->service);
@@ -591,8 +621,8 @@ static void restore_rules(daemon_t *d)
             table[sizeof(t->reward.table)]; /* reward_init() clears t->reward */
         strcpy(table, t->reward.table);
         if (reward_init(&t->reward, table, g_config_abs, tr->interface,
-                        tr->ports, tr->n_ports, tr->protocol, tr->fallback_ttl,
-                        tr->max_allowed) != 0)
+                        tr->close_on, tr->ports, tr->n_ports, tr->protocol,
+                        tr->fallback_ttl, tr->max_allowed) != 0)
             sk_log("[%s] could not restore its nft table", tr->service);
     }
     prune(d);
