@@ -133,18 +133,23 @@ secret and the clock, like a 2FA code:
   FILE -r`); `admin_sequence` can't be combined with `secret_file`.
 
 Create a secret (at least 16 bytes; the file's bytes, minus trailing
-whitespace, are the key) and give the daemon read access:
+whitespace, are the key). The file must have mode 0600, owned by the user that
+runs the daemon:
 
 ```sh
 head -c 32 /dev/urandom | base64 | sudo tee /etc/sourceknock/ssh.key >/dev/null
-sudo chown root:sourceknock /etc/sourceknock/ssh.key
-sudo chmod 0640 /etc/sourceknock/ssh.key
+sudo chown sourceknock:sourceknock /etc/sourceknock/ssh.key
+sudo chmod 0600 /etc/sourceknock/ssh.key
 ```
 
 Copy the same file to each client (keep it private) and knock with
 `sourceknock-knock -K ~/.config/sourceknock/ssh.key server.example.com`. The
 secret is read at start and on every reload, so a new secret takes effect with
 `systemctl reload sourceknock`.
+
+If the group or other users can read a key file, the daemon logs a warning
+at start, at reload and in `sourceknock -t`, and `sourceknock-knock -K` prints
+it on stderr. Both still use the key. Fix it with `chmod 600 FILE`.
 
 ## IPv4 and IPv6
 

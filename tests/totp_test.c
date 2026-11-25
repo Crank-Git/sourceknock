@@ -4,6 +4,7 @@
 /* totp_test.c - SHA-256 / HMAC against published vectors, and sequences. */
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "test.h"
 #include "totp.h"
@@ -133,6 +134,27 @@ static void test_load_key(void)
     CHECK(strstr(err, "cannot read") != NULL);
 }
 
+static void test_key_mode_warning(void)
+{
+    char msg[256];
+    const char *p = "totp_mode_test.key";
+    FILE *f = fopen(p, "w");
+    fputs("0123456789abcdef0123\n", f);
+    fclose(f);
+    CHECK_EQ_INT(chmod(p, 0600), 0);
+    CHECK_EQ_INT(totp_key_mode_warning(p, msg, sizeof(msg)), 0);
+    CHECK_EQ_INT(chmod(p, 0644), 0);
+    CHECK_EQ_INT(totp_key_mode_warning(p, msg, sizeof(msg)), 1);
+    CHECK(strstr(msg, p) != NULL);
+    CHECK(strstr(msg, "0644") != NULL);
+    CHECK(strstr(msg, "chmod 600") != NULL);
+    CHECK_EQ_INT(chmod(p, 0640), 0);
+    CHECK_EQ_INT(totp_key_mode_warning(p, msg, sizeof(msg)), 1);
+    remove(p);
+    /* A missing file is totp_load_key()'s to report, not a mode warning. */
+    CHECK_EQ_INT(totp_key_mode_warning(p, msg, sizeof(msg)), 0);
+}
+
 int main(void)
 {
     printf("== totp tests ==\n");
@@ -141,5 +163,6 @@ int main(void)
     TEST_RUN(test_step);
     TEST_RUN(test_sequence);
     TEST_RUN(test_load_key);
+    TEST_RUN(test_key_mode_warning);
     TEST_SUMMARY();
 }

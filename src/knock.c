@@ -318,6 +318,8 @@ int main(int argc, char **argv)
             return 1;
         }
         sent_step = last == cur ? cur + 1 : cur;
+        if (totp_key_mode_warning(keyfile, err, sizeof(err)))
+            fprintf(stderr, "sourceknock-knock: warning: %s\n", err);
         uint16_t ports[TOTP_SEQ_LEN];
         totp_sequence(key, keylen, label, sent_step, ports);
         memset(key, 0, sizeof(key));
