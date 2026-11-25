@@ -21,6 +21,13 @@
  * frames sent to that destination port do. */
 int knock_counts(const trigger_t *tr, const pkt_info_t *pkt);
 
+/* Feed a captured frame to a knock state machine, but only if it counts
+ * (knock_counts). A frame that doesn't count returns KNOCK_IGNORE and neither
+ * advances nor resets the knock. The daemon and the unit tests share this
+ * step, so a test of it covers the code the daemon runs. */
+kn_result_t knock_feed(const trigger_t *tr, kn_ctx_t *ctx,
+                       const pkt_info_t *pkt, double ts);
+
 /* Is `port` one of the trigger's service ports? */
 int port_in_list(const trigger_t *tr, uint16_t port);
 

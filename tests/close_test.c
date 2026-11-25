@@ -138,6 +138,66 @@ static void test_knock_counts_tcp_flags(void)
     CHECK(!knock_counts(&tr, pkt(PROTO_TCP, 4444, PKT_TCP_ACK)));
 }
 
+/* A frame with an address, a source port and TCP flags, for the dispatch tests.
+ */
+static const pkt_info_t *frame(proto_t proto, uint16_t sport, uint16_t dport,
+                               uint8_t flags)
+{
+    static pkt_info_t p;
+    memset(&p, 0, sizeof(p));
+    p.family = AF_INET;
+    p.addr.v4.s_addr = 0x0a000001;
+    p.proto = proto;
+    p.sport = sport;
+    p.dport = dport;
+    p.tcp_flags = flags;
+    return &p;
+}
+
+/* issue #75: the real dispatch step (knock_feed) with a TCP ACK segment from
+ * the same client in the middle of a knock. */
+static void test_ack_segment_does_not_reset_knock(void)
+{
+    uint16_t svc[] = {22};
+    uint16_t seq_ports[] = {1100, 2200, 3300};
+    knock_sequence_t seq = {seq_ports, 3};
+    trigger_t tr = make_trigger(MODE_FIXED_TTL, svc, 1);
+    kn_ctx_t *ctx = kn_create(&seq, 10.0);
+
+    CHECK_EQ_INT(knock_feed(&tr, ctx, frame(PROTO_UDP, 1100, 9, 0), 0.0),
+                 KNOCK_PROGRESS);
+    /* data segment of an open session: other source port, ACK set */
+    CHECK_EQ_INT(knock_feed(&tr, ctx,
+                            frame(PROTO_TCP, 5555, 22, PKT_TCP_ACK | 0x08),
+                            0.1),
+                 KNOCK_IGNORE);
+    CHECK_EQ_INT(knock_feed(&tr, ctx, frame(PROTO_UDP, 2200, 9, 0), 0.2),
+                 KNOCK_PROGRESS);
+    CHECK_EQ_INT(knock_feed(&tr, ctx, frame(PROTO_UDP, 3300, 9, 0), 0.3),
+                 KNOCK_TRIGGER);
+    kn_free(ctx);
+}
+
+/* Without knock_port, a UDP frame with a wrong source port still resets. */
+static void test_udp_frame_resets_knock_without_knock_port(void)
+{
+    uint16_t svc[] = {22};
+    uint16_t seq_ports[] = {1100, 2200, 3300};
+    knock_sequence_t seq = {seq_ports, 3};
+    trigger_t tr = make_trigger(MODE_FIXED_TTL, svc, 1);
+    kn_ctx_t *ctx = kn_create(&seq, 10.0);
+
+    CHECK_EQ_INT(knock_feed(&tr, ctx, frame(PROTO_UDP, 1100, 9, 0), 0.0),
+                 KNOCK_PROGRESS);
+    CHECK_EQ_INT(knock_feed(&tr, ctx, frame(PROTO_UDP, 5555, 51820, 0), 0.1),
+                 KNOCK_RESET);
+    CHECK_EQ_INT(knock_feed(&tr, ctx, frame(PROTO_UDP, 2200, 9, 0), 0.2),
+                 KNOCK_IGNORE);
+    CHECK_EQ_INT(knock_feed(&tr, ctx, frame(PROTO_UDP, 3300, 9, 0), 0.3),
+                 KNOCK_IGNORE);
+    kn_free(ctx);
+}
+
 int main(void)
 {
     printf("== close decision tests ==\n");
@@ -149,5 +209,7 @@ int main(void)
     TEST_RUN(test_port_in_list);
     TEST_RUN(test_knock_counts);
     TEST_RUN(test_knock_counts_tcp_flags);
+    TEST_RUN(test_ack_segment_does_not_reset_knock);
+    TEST_RUN(test_udp_frame_resets_knock_without_knock_port);
     TEST_SUMMARY();
 }

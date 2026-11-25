@@ -11,6 +11,14 @@ int knock_counts(const trigger_t *tr, const pkt_info_t *pkt)
     return tr->knock_port == 0 || pkt->dport == tr->knock_port;
 }
 
+kn_result_t knock_feed(const trigger_t *tr, kn_ctx_t *ctx,
+                       const pkt_info_t *pkt, double ts)
+{
+    if (!knock_counts(tr, pkt))
+        return KNOCK_IGNORE;
+    return kn_feed(ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+}
+
 int port_in_list(const trigger_t *tr, uint16_t port)
 {
     for (size_t i = 0; i < tr->n_ports; i++)
