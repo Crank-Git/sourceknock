@@ -127,7 +127,7 @@ packet_test: tests/packet_test.o src/packet.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 config_test: tests/config_test.o src/config.o
 	$(CC) $^ -o $@ $(LDFLAGS)
-close_test: tests/close_test.o src/close.o
+close_test: tests/close_test.o src/close.o src/state.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 totp_test: tests/totp_test.o src/totp.o
 	$(CC) $^ -o $@ $(LDFLAGS)

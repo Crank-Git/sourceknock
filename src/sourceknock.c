@@ -298,29 +298,33 @@ static void on_packet(const pkt_info_t *pkt, const char *iface, double ts,
         if (strcmp(t->tr->interface, iface) != 0)
             continue;
 
-        /* With knock_port set, only frames sent to that port are part of a
-         * knock; anything else (other traffic from the same client, replies
-         * to the server's own outbound connections) can't advance or reset
-         * it. */
-        if (knock_counts(t->tr, pkt->dport) && t->rolling)
+        /* Segments of an open TCP flow never count. With knock_port set,
+         * only frames sent to that port are part of a knock; anything else
+         * (other traffic from the same client, replies to the server's own
+         * outbound connections) can't advance or reset it. */
+        if (t->rolling)
         {
-            long step = totp_step((long)time(NULL));
-            int replay;
-            r = rolling_feed(&t->roll, step, pkt->family, &pkt->addr,
+            if (knock_counts(t->tr, pkt))
+            {
+                long step = totp_step((long)time(NULL));
+                int replay;
+                r = rolling_feed(&t->roll, step, pkt->family, &pkt->addr,
+                                 pkt->sport, ts, &replay);
+                if (replay)
+                    sk_log("[%s] repeated knock from %s ignored: that time "
+                           "step's knock was already used",
+                           t->tr->service, s);
+                else if (r == KNOCK_RESET)
+                    sk_log("[%s] incomplete/wrong knock from %s: progress "
+                           "reset",
+                           t->tr->service, s);
+                rolling_feed(&t->roll_revoke, step, pkt->family, &pkt->addr,
                              pkt->sport, ts, &replay);
-            if (replay)
-                sk_log("[%s] repeated knock from %s ignored: that time "
-                       "step's knock was already used",
-                       t->tr->service, s);
-            else if (r == KNOCK_RESET)
-                sk_log("[%s] incomplete/wrong knock from %s: progress reset",
-                       t->tr->service, s);
-            rolling_feed(&t->roll_revoke, step, pkt->family, &pkt->addr,
-                         pkt->sport, ts, &replay);
+            }
         }
-        else if (knock_counts(t->tr, pkt->dport))
+        else
         {
-            r = kn_feed(t->ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+            r = knock_feed(t->tr, t->ctx, pkt, ts);
             if (r == KNOCK_RESET)
                 sk_log("[%s] incomplete/wrong knock from %s: progress reset",
                        t->tr->service, s);
@@ -328,7 +332,7 @@ static void on_packet(const pkt_info_t *pkt, const char *iface, double ts,
             /* Optional admin/revoke sequence runs on its own state machine
              * so it never interferes with the primary knock. */
             if (t->admin_ctx)
-                kn_feed(t->admin_ctx, pkt->family, &pkt->addr, pkt->sport, ts);
+                knock_feed(t->tr, t->admin_ctx, pkt, ts);
         }
 
         /* close_on_connect: a packet to the service dest port after arming
