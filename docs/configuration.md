@@ -72,7 +72,8 @@ closed port sends, so a scan still sees nothing.
   several interfaces (e.g. `eth0` and `wg0`). The drop rules match only packets
   arriving on that interface: the same port reached over any other interface
   (a VPN such as `tailscale0`, or `lo`) is not touched, so it can't lock you
-  out there. Ethernet, loopback, tun, WireGuard, PPP and ipip / ip6tnl / sit
+  out there. The exception is `close_on = all` (below), which closes the
+  ports on every interface. Ethernet, loopback, tun, WireGuard, PPP and ipip / ip6tnl / sit
   links work.
 
 - `close_on = interface | all` — where the drop rules apply. Set it in
@@ -157,8 +158,8 @@ secret and the clock, like a 2FA code:
   FILE -r`); `admin_sequence` can't be combined with `secret_file`.
 
 Create a secret (at least 16 bytes; the file's bytes, minus trailing
-whitespace, are the key). The file must have mode 0600, owned by the user that
-runs the daemon:
+whitespace, are the key). The file should have mode 0600, owned by the user that
+runs the daemon (the daemon warns when group or other users can read it):
 
 ```sh
 head -c 32 /dev/urandom | base64 | sudo tee /etc/sourceknock/ssh.key >/dev/null

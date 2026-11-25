@@ -266,7 +266,9 @@ int config_open_interfaces_warning(const trigger_t *tr,
     if (tr->close_on != CLOSE_ON_INTERFACE)
         return 0;
     const char *tail = "; set close_on = all to block them";
-    char list[256] = "";
+    /* The caller's message buffer is 320 bytes: the fixed text and the advice
+     * take 80, so the list stays at 200 and the advice always fits. */
+    char list[200] = "";
     size_t used = 0;
     for (size_t i = 0; i < n; i++)
     {

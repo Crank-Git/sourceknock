@@ -14,7 +14,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700 /* realpath() */
-#define _DEFAULT_SOURCE /* IFF_UP, getifaddrs() */
+#define _DEFAULT_SOURCE   /* IFF_UP, getifaddrs() */
 #include "capture.h"
 #include "close.h"
 #include "config.h"
@@ -359,7 +359,7 @@ static int load_keys(unsigned char (*keys)[TOTP_KEY_MAX], size_t *keylens)
         char err[320];
         if (tr->secret_file[0] &&
             totp_key_mode_warning(tr->secret_file, err, sizeof(err)))
-            fprintf(stderr, "[%s] warning: %s\n", tr->service, err);
+            sk_log("[%s] warning: %s", tr->service, err);
         if (tr->secret_file[0] &&
             totp_load_key(tr->secret_file, keys[i], &keylens[i], err,
                           sizeof(err)) != 0)
@@ -614,6 +614,10 @@ fail:
          * a service port closed with no daemon to open it. */
         for (size_t i = 0; i < d->n_triggers; i++)
             reward_destroy(&d->ts[i].reward);
+        /* A failed reward_init() deletes nothing, so a table that a previous
+         * run of this config left behind (drop rules included) is still
+         * there. Remove every table that carries this config's mark. */
+        reward_prune_stale(g_config_abs, NULL, 0);
     }
     if (d->ts)
         daemon_free(d, caps, n_caps);

@@ -155,7 +155,7 @@ a file holding a shared secret (at least 16 bytes). The sequence is then 4
 ports derived from HMAC-SHA256 of the secret and the 30-second time step,
 like a 2FA code. The previous, current and next step are accepted (clocks may
 differ by about 30 seconds; keep them synced), and each step's sequence opens
-the port only once, so a seen knock can't be replayed. The file must have
+the port only once, so a seen knock can't be replayed. The file should have
 mode 0600 (owned by the daemon's user). If the group or other users can read
 it, the daemon logs a warning at start, at reload and in
 .BR "\-t" ,
@@ -173,7 +173,9 @@ on; defaults to the
 .B [global]
 .BR interface .
 The drop rules match only packets arriving on it, so the same port over any
-other interface (a VPN, loopback) is left alone. One daemon can guard
+other interface (a VPN, loopback) is left alone, unless the trigger sets
+.BR "close_on = all" .
+One daemon can guard
 services on several interfaces this way. An interface that is down, deleted
 or not there yet does not stop the daemon: that trigger's ports stay closed
 and knocks are read there again once it is up.

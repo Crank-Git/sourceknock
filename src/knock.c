@@ -128,6 +128,8 @@ static int state_read(const char *path, long *last)
 static int state_write(const char *path, long step)
 {
     char dir[PATH_MAX];
+    if (strlen(path) >= sizeof(dir))
+        return -1;
     snprintf(dir, sizeof(dir), "%s", path);
     char *slash = strrchr(dir, '/');
     if (slash)
@@ -297,6 +299,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "sourceknock-knock: %s\n", err);
             return 1;
         }
+        if (totp_key_mode_warning(keyfile, err, sizeof(err)))
+            fprintf(stderr, "sourceknock-knock: warning: %s\n", err);
         const char *label = revoke ? TOTP_LABEL_REVOKE : TOTP_LABEL_KNOCK;
         long now = (long)time(NULL), cur = totp_step(now), last = -1;
         have_state =
@@ -318,8 +322,6 @@ int main(int argc, char **argv)
             return 1;
         }
         sent_step = last == cur ? cur + 1 : cur;
-        if (totp_key_mode_warning(keyfile, err, sizeof(err)))
-            fprintf(stderr, "sourceknock-knock: warning: %s\n", err);
         uint16_t ports[TOTP_SEQ_LEN];
         totp_sequence(key, keylen, label, sent_step, ports);
         memset(key, 0, sizeof(key));

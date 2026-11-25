@@ -116,7 +116,8 @@ expect_refuse() { # label conf [nocap]
     check "$label: refuses to start (exit $rc)" 1 0; tail -5 "$out"
   fi
   local left; left="$(nft_tables)"
-  if [ "$left" = "0" ]; then check "$label: no table left behind" 1 1; else check "$label: no table left behind ($left)" 1 0; fi
+  # KEEP: tables the test made itself (a failed run leaves those as they were).
+  if [ "$left" = "${KEEP:-0}" ]; then check "$label: no table left behind" 1 1; else check "$label: no table left behind ($left)" 1 0; fi
   if probe; then check "$label: port untouched" 1 1; else check "$label: port untouched" 1 0; fi
   sudo ip netns exec "$NS" nft flush ruleset
 }
@@ -134,7 +135,10 @@ grep -q "could not program nftables" "$WORK/refuse.log" && check "no CAP_NET_ADM
 
 
 # An nft object the daemon can't reconcile (allowed_v4 with the wrong type).
-sudo ip netns exec "$NS" nft add table inet "sourceknock_$SERVICE"
+# The table is one a previous run of this config left behind, so it carries
+# this config's owner mark: a failed startup must remove it, or its port would
+# stay closed with no daemon to open it.
+sudo ip netns exec "$NS" nft add table inet "sourceknock_$SERVICE" "{ comment \"sourceknock:$(realpath "$CONF")\"; }"
 sudo ip netns exec "$NS" nft add set inet "sourceknock_$SERVICE" allowed_v4 '{ type ipv6_addr; }'
 expect_refuse "conflicting nft set" "$CONF"
 
@@ -143,7 +147,7 @@ expect_refuse "conflicting nft set" "$CONF"
 { cat "$CONF"; printf '\n[trigger:other]\nservice = other\nport = %s\nsequence = 4400,5500,6600\n' "$((PORT+5))"; } > "$WORK/two.conf"
 sudo ip netns exec "$NS" nft add table inet sourceknock_other
 sudo ip netns exec "$NS" nft add set inet sourceknock_other allowed_v4 '{ type ipv6_addr; }'
-expect_refuse "second trigger fails" "$WORK/two.conf"
+KEEP=1 expect_refuse "second trigger fails" "$WORK/two.conf"
 
 # Wait for a file to appear (up to ~5s).
 wait_file() { for _ in $(seq 1 50); do [ -f "$1" ] && return 0; sleep 0.1; done; return 1; }
@@ -629,6 +633,30 @@ if [ $(( $(date +%s) / 30 )) -eq "$STEP0" ]; then
   kk replay2 -s "$CLIENT" -d 50 -p 4445 -K "$WORK/good.key" "$SERVER"; sleep 0.5
   totp_set | grep -q "$CLIENT" && check "used step still refused after reload" 0 1 || check "used step still refused after reload" 0 0
 fi
+
+# A reload whose nft run fails must leave the live table alone: the drop rules
+# stay and the clients already let in stay in. The failure is a conflict nft
+# rejects: the live chain exists with another priority than the daemon's.
+echo "--- reload whose nft run fails ---"
+TT=sourceknock_totpe2e
+sudo ip netns exec "$NS" nft flush chain inet $TT service
+sudo ip netns exec "$NS" nft delete chain inet $TT service
+sudo ip netns exec "$NS" nft add chain inet $TT service '{ type filter hook input priority 5; policy accept; }'
+sudo ip netns exec "$NS" nft add rule inet $TT service tcp dport "$TOTP_PORT" drop
+sudo ip netns exec "$NS" nft flush set inet $TT allowed_v4
+sudo ip netns exec "$NS" nft add element inet $TT allowed_v4 "{ $CLIENT timeout 300s }"
+n0=$(grep -c "could not apply the new config" "$LOG")
+sudo pkill -HUP -x sourceknock
+for _ in $(seq 1 50); do [ "$(grep -c "could not apply the new config" "$LOG")" -gt "$n0" ] && break; sleep 0.1; done
+[ "$(grep -c "could not apply the new config" "$LOG")" -gt "$n0" ] && check "failed reload is refused" 1 1 || { check "failed reload is refused" 1 0; tail -8 "$LOG"; }
+sudo ip netns exec "$NS" nft list chain inet $TT service 2>/dev/null | grep -q "dport $TOTP_PORT drop" && check "failed reload keeps the drop rules" 1 1 || check "failed reload keeps the drop rules" 1 0
+totp_set | grep -q "$CLIENT" && check "failed reload keeps the allowed clients" 1 1 || { check "failed reload keeps the allowed clients" 1 0; sudo ip netns exec "$NS" nft list table inet $TT; tail -12 "$LOG"; }
+# Remove the conflict; the next reload rebuilds the chain.
+sudo ip netns exec "$NS" nft flush chain inet $TT service
+sudo ip netns exec "$NS" nft delete chain inet $TT service
+n0=$(grep -c "reload: applied" "$LOG")
+sudo pkill -HUP -x sourceknock
+for _ in $(seq 1 50); do [ "$(grep -c "reload: applied" "$LOG")" -gt "$n0" ] && break; sleep 0.1; done
 
 # Log timestamps are wall-clock time (not time since boot).
 echo "--- log timestamps ---"
